@@ -20,7 +20,8 @@ beat the cheap baselines? See PLAN.md §5.
 | Content-addressed blob store for tool outputs | Staleness validation (M3) |
 | `record_finding` tool; cited sources checked against the event log | Self-summary arm; cross-session mutation arm |
 | Verbatim task + constraints pinned per thread, with resume lineage | Action cache (M4), side-effect safety (M5) |
-| Eval arms: full / masked / slim / scratch, graded from the event log | Persistent backends (all in-memory for now) |
+| Thought state per agent step (thinking summaries + signed blocks), indexed by checkpoint next to findings | Persistent backends (all in-memory for now) |
+| Eval arms: full / masked / slim / slim_thoughts / scratch, graded from the event log | |
 
 Two kinds of record are kept apart throughout: **events** are written by the
 tool layer and the model cannot author them; **findings** are written by the model and
@@ -29,7 +30,7 @@ are trusted only as far as the events they cite.
 ## Layout
 
 ```
-src/tracegraph/      library: canonical hashing, CAS, events/Recorder, findings, tasks, resume
+src/tracegraph/      library: canonical hashing, CAS, events/Recorder, findings, thoughts, tasks, resume, index
 spike/agent.py       minimal ReAct loop on StateGraph + ToolNode with TraceGraph attached
 spike/eval.py        M0 eval harness
 spike/fixtures/shop  fixture repo with one planted bug (shop/pagination.py::paginate, end index off by one)
@@ -51,6 +52,8 @@ or `--model` to change). Reports go to `spike/runs/<timestamp>/report.json`.
 Eval notes:
 - The fixture's `tests/` directory gives the answer away. The task forbids reading it,
   and violations are counted from recorded events, not from what the model says.
-- Copied histories (full / masked arms) have thinking blocks stripped, because current
-  Claude models bind thinking blocks to the conversation that produced them. All arms are
-  treated the same way.
+- Reasoning stays on the server. Signed thinking blocks are bound to the model and the exact
+  conversation that produced them, so copied histories (full / masked arms) have them stripped.
+  They are not lost: every agent step's blocks and readable summaries are kept as a thought
+  state indexed by checkpoint (PLAN.md §2.8). The `slim_thoughts` arm measures whether
+  offering those summaries on resume helps.

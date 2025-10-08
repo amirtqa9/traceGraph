@@ -15,9 +15,16 @@ from tracegraph.cas import BlobStore
 from tracegraph.events import EVENT_ID_RE, EventLog, message_text
 from tracegraph.findings import FindingsLedger
 from tracegraph.tasks import TaskRegistry
+from tracegraph.thoughts import ThoughtLog
 
 
-def slim_brief(tasks: TaskRegistry, ledger: FindingsLedger, source_thread: str) -> str:
+def slim_brief(
+    tasks: TaskRegistry,
+    ledger: FindingsLedger,
+    source_thread: str,
+    thoughts: ThoughtLog | None = None,
+    max_thoughts: int = 5,
+) -> str:
     lineage = tasks.lineage(source_thread)
     spec = tasks.get(lineage[0])
     if spec is None:
@@ -51,6 +58,15 @@ def slim_brief(tasks: TaskRegistry, ledger: FindingsLedger, source_thread: str) 
         out += ["", "## Open TODOs"] + [f"- [{f.finding_id}] {f.text}" for f in todos]
     if unsourced:
         out += ["", f"({unsourced} unsourced finding(s) were dropped as untrusted.)"]
+    if thoughts is not None:
+        summaries = [t.summary for t in thoughts.for_threads(lineage) if t.summary][-max_thoughts:]
+        if summaries:
+            out += [
+                "",
+                "## Prior reasoning (the earlier session's thinking summaries; NOT evidence)",
+                "Use these only as leads. Verify anything here before relying on it.",
+            ]
+            out += [f"- {s}" for s in summaries]
     out += [
         "",
         "Before relying on a `ruled_out` finding, spot-check one with recall_event(<source id>). "

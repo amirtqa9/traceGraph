@@ -15,6 +15,7 @@ from typing import Annotated
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
@@ -25,6 +26,7 @@ from typing_extensions import TypedDict
 from tracegraph import BlobStore, EventLog, FindingsLedger, Recorder, TaskRegistry
 from tracegraph.findings import make_record_finding_tool
 from tracegraph.resume import make_recall_tool
+from tracegraph.thoughts import ThoughtLog
 
 SYSTEM_PROMPT = """You are a careful debugging agent working in a read-only repository.
 
@@ -39,7 +41,10 @@ ANSWER: <path>::<function>"""
 
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+    # Memory state and thought state, both cumulative and checkpointed at every step,
+    # so any checkpoint indexes the findings and thoughts that existed at that point.
     tg_findings: Annotated[list[str], operator.add]
+    tg_thoughts: Annotated[list[str], operator.add]
 
 
 def workspace_tools(root: Path) -> list[BaseTool]:
@@ -88,15 +93,18 @@ class TraceGraphComponents:
     blobs: BlobStore
     ledger: FindingsLedger
     tasks: TaskRegistry
+    thoughts: ThoughtLog
 
 
 def components(store: BaseStore, project_id: str, data_dir: str | os.PathLike[str]) -> TraceGraphComponents:
     events = EventLog(store, project_id)
+    blobs = BlobStore(Path(data_dir) / "blobs")
     return TraceGraphComponents(
         events=events,
-        blobs=BlobStore(Path(data_dir) / "blobs"),
+        blobs=blobs,
         ledger=FindingsLedger(store, project_id, events),
         tasks=TaskRegistry(store, project_id),
+        thoughts=ThoughtLog(store, project_id, blobs),
     )
 
 
@@ -113,8 +121,10 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
     ]
     bound = model.bind_tools(tools)
 
-    def call_model(state: AgentState) -> dict:
-        return {"messages": [bound.invoke([SystemMessage(SYSTEM_PROMPT), *state["messages"]])]}
+    def call_model(state: AgentState, config: RunnableConfig) -> dict:
+        response = bound.invoke([SystemMessage(SYSTEM_PROMPT), *state["messages"]])
+        thought = tg.thoughts.capture(response, config)
+        return {"messages": [response], "tg_thoughts": [thought.thought_id] if thought else []}
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", call_model)
@@ -131,6 +141,8 @@ def claude_model(model_id: str | None = None) -> BaseChatModel:
     return ChatAnthropic(
         model=model_id or os.environ.get("TG_MODEL", "claude-opus-5-5"),
         max_tokens=16000,
-        thinking={"type": "adaptive"},
+        # "summarized" returns readable thinking summaries for the thought state;
+        # the default ("omitted") would leave them empty.
+        thinking={"type": "adaptive", "display": "summarized"},
         output_config={"effort": os.environ.get("TG_EFFORT", "medium")},
     )

@@ -34,8 +34,14 @@ class ScriptedChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=self.policy(messages))])
 
 
-def call(name: str, **args) -> AIMessage:
-    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": f"call_{next(_ids)}"}])
+def thinking(summary: str) -> dict:
+    # Shape of a Claude thinking block with display="summarized": readable summary + opaque signature.
+    return {"type": "thinking", "thinking": summary, "signature": f"sig-{next(_ids)}"}
+
+
+def call(name: str, thought: str = "", **args) -> AIMessage:
+    content = [thinking(thought)] if thought else ""
+    return AIMessage(content=content, tool_calls=[{"name": name, "args": args, "id": f"call_{next(_ids)}"}])
 
 
 def debugging_policy(messages: list[BaseMessage]) -> AIMessage:
@@ -48,12 +54,17 @@ def debugging_policy(messages: list[BaseMessage]) -> AIMessage:
     read = [m for m in messages if isinstance(m, ToolMessage) and "def paginate" in message_text(m.content)]
     recorded = "Recorded fd_" in text or re.search(r"\[fd_[0-9a-f]{12}\] \(fact\)", text)
     if recorded:
-        return AIMessage(content="The end index is off by one.\nANSWER: shop/pagination.py::paginate")
+        return AIMessage(content=[
+            thinking("Finding confirms the off-by-one; answer."),
+            {"type": "text", "text": "The end index is off by one.\nANSWER: shop/pagination.py::paginate"},
+        ])
     if not read:
-        return call("read_file", path="shop/pagination.py")
+        return call("read_file", thought="Overlap between pages smells like a slicing bug; check pagination.",
+                    path="shop/pagination.py")
     event_id = EVENT_ID_RE.search(message_text(read[-1].content)).group(1)
     return call(
         "record_finding",
+        thought="end = start + size + 1 returns one extra item; record it.",
         text="shop/pagination.py::paginate uses end = start + size + 1, so pages overlap by one item",
         kind="fact",
         method="read_file on shop/pagination.py",
