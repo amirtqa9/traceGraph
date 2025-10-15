@@ -5,7 +5,8 @@
      full     whole history (consistent prefix), thinking stripped
      masked   same, but all but the last 2 tool outputs replaced by event pointers
      slim     verbatim task + constraints + sourced findings only (TraceGraph)
-     slim_thoughts  slim + the source session's thinking summaries, labeled as leads
+     slim_memory     slim + the agent's last working-memory snapshot (record_thought)
+     slim_reasoning  slim + the provider's reasoning text, labeled as leads
      scratch  the task alone, as if nothing had happened
 3. Each run is graded on correctness, constraint violations (read from the event
    log, not from the model's account), tokens and tool calls.
@@ -49,7 +50,7 @@ CONSTRAINTS = (
 )
 EXPECTED_PATH = "shop/pagination.py"
 EXPECTED_FUNCTION = "paginate"
-ARMS = ("full", "masked", "slim", "slim_thoughts", "scratch")
+ARMS = ("full", "masked", "slim", "slim_memory", "slim_reasoning", "scratch")
 RESUME_NOTE = "(Session resumed after an interruption. Continue the task.)"
 ANSWER_RE = re.compile(r"ANSWER:\s*(\S+?)::(\w+)")
 
@@ -79,8 +80,10 @@ def seed_messages(arm: str, source: list[BaseMessage], tg, source_thread: str, s
         return mask_observations(history, keep_last=2)
     if arm == "slim":
         return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread))]
-    if arm == "slim_thoughts":
-        return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread, thoughts=tg.thoughts))]
+    if arm == "slim_memory":
+        return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread, tg.thoughts, working_memory=True))]
+    if arm == "slim_reasoning":
+        return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread, tg.thoughts, provider_reasoning=True))]
     if arm == "scratch":
         return [HumanMessage(spec.render())]
     raise ValueError(arm)
@@ -150,7 +153,8 @@ def run_eval(
             "tool_calls": len(tg.events.for_thread(source_thread)),
             "findings": len(source_findings),
             "sourced_findings": sum(f.sourced for f in source_findings),
-            "thought_states": len(tg.thoughts.for_threads([source_thread])),
+            "working_memory_states": len(tg.thoughts.for_threads([source_thread], source="agent")),
+            "provider_reasoning_states": len(tg.thoughts.for_threads([source_thread], source="provider")),
             "already_answered": grade(source, []).get("correct", False),
         },
         "runs": runs,

@@ -38,6 +38,7 @@ class Finding:
     rejected_sources: tuple[str, ...]  # cited IDs with no matching event
     author: str = "agent"
     supersedes: str | None = None
+    promoted_from: str | None = None  # thought ID this finding confirms, if any
 
     @property
     def sourced(self) -> bool:
@@ -76,11 +77,12 @@ class FindingsLedger:
         cited: list[str],
         author: str = "agent",
         supersedes: str | None = None,
+        promoted_from: str | None = None,
     ) -> Finding:
         cited = list(dict.fromkeys(cited))  # dedupe, keep order
         verified = tuple(c for c in cited if self.events.get(c) is not None)
         rejected = tuple(c for c in cited if c not in verified)
-        identity = [self.project_id, thread_id, text, kind, method, sorted(verified), supersedes]
+        identity = [self.project_id, thread_id, text, kind, method, sorted(verified), supersedes, promoted_from]
         finding = Finding(
             finding_id=short_id("fd", identity),
             project_id=self.project_id,
@@ -92,6 +94,7 @@ class FindingsLedger:
             rejected_sources=rejected,
             author=author,
             supersedes=supersedes,
+            promoted_from=promoted_from,
         )
         self.store.put(self.namespace, finding.finding_id, finding.to_dict(), index=False)
         return finding
@@ -120,6 +123,7 @@ def make_record_finding_tool(ledger: FindingsLedger) -> BaseTool:
         sources: list[str],
         runtime: ToolRuntime,
         supersedes: str | None = None,
+        from_thought: str | None = None,
     ) -> Command:
         """Record a conclusion so a later session can continue without redoing work.
 
@@ -129,6 +133,7 @@ def make_record_finding_tool(ledger: FindingsLedger) -> BaseTool:
             method: How you established it (which tool, what you looked for).
             sources: The `ev_...` event IDs (shown under each tool result) that support it.
             supersedes: ID of an earlier finding this one corrects, if any.
+            from_thought: ID of the working-memory thought (th_...) whose hypothesis this confirms, if any.
         """
         thread_id = runtime.config.get("configurable", {}).get("thread_id", "")
         finding = ledger.add(
@@ -138,6 +143,7 @@ def make_record_finding_tool(ledger: FindingsLedger) -> BaseTool:
             method=method,
             cited=sources,
             supersedes=supersedes,
+            promoted_from=from_thought,
         )
         reply = f"Recorded {finding.finding_id}."
         if finding.rejected_sources:

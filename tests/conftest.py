@@ -34,6 +34,10 @@ class ScriptedChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=self.policy(messages))])
 
 
+ANTHROPIC_META = {"model_provider": "anthropic", "model_name": "scripted-claude"}
+THOUGHT_ID_RE = re.compile(r"Working memory saved as (th_[0-9a-f]{12})")
+
+
 def thinking(summary: str) -> dict:
     # Shape of a Claude thinking block with display="summarized": readable summary + opaque signature.
     return {"type": "thinking", "thinking": summary, "signature": f"sig-{next(_ids)}"}
@@ -41,11 +45,15 @@ def thinking(summary: str) -> dict:
 
 def call(name: str, thought: str = "", **args) -> AIMessage:
     content = [thinking(thought)] if thought else ""
-    return AIMessage(content=content, tool_calls=[{"name": name, "args": args, "id": f"call_{next(_ids)}"}])
+    return AIMessage(
+        content=content,
+        tool_calls=[{"name": name, "args": args, "id": f"call_{next(_ids)}"}],
+        response_metadata=ANTHROPIC_META,
+    )
 
 
 def debugging_policy(messages: list[BaseMessage]) -> AIMessage:
-    """Read pagination.py, record a sourced finding, answer.
+    """Read pagination.py -> save working memory -> promote it to a finding -> answer.
 
     Skips steps already covered by visible context (a slim brief or earlier turns),
     so the same policy works for every resume arm.
@@ -53,15 +61,29 @@ def debugging_policy(messages: list[BaseMessage]) -> AIMessage:
     text = "\n".join(message_text(m.content) for m in messages)
     read = [m for m in messages if isinstance(m, ToolMessage) and "def paginate" in message_text(m.content)]
     recorded = "Recorded fd_" in text or re.search(r"\[fd_[0-9a-f]{12}\] \(fact\)", text)
+    thought = THOUGHT_ID_RE.search(text)
     if recorded:
-        return AIMessage(content=[
-            thinking("Finding confirms the off-by-one; answer."),
-            {"type": "text", "text": "The end index is off by one.\nANSWER: shop/pagination.py::paginate"},
-        ])
+        return AIMessage(
+            content=[
+                thinking("Finding confirms the off-by-one; answer."),
+                {"type": "text", "text": "The end index is off by one.\nANSWER: shop/pagination.py::paginate"},
+            ],
+            response_metadata=ANTHROPIC_META,
+        )
     if not read:
         return call("read_file", thought="Overlap between pages smells like a slicing bug; check pagination.",
                     path="shop/pagination.py")
     event_id = EVENT_ID_RE.search(message_text(read[-1].content)).group(1)
+    if not thought:
+        return call(
+            "record_thought",
+            thought="Suspect the end index; save working memory before confirming.",
+            hypotheses=[{"text": "paginate() end index is one too far", "confidence": 0.8,
+                         "supports": [event_id, "ev_ffffffffffff"]}],
+            plan=["confirm the slice bounds", "record the finding", "answer"],
+            open_questions=["does search() add its own offset?"],
+            next_step="record the finding",
+        )
     return call(
         "record_finding",
         thought="end = start + size + 1 returns one extra item; record it.",
@@ -69,6 +91,7 @@ def debugging_policy(messages: list[BaseMessage]) -> AIMessage:
         kind="fact",
         method="read_file on shop/pagination.py",
         sources=[event_id, "ev_000000000000"],
+        from_thought=thought.group(1),
     )
 
 

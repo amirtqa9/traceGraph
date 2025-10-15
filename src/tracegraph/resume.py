@@ -23,7 +23,10 @@ def slim_brief(
     ledger: FindingsLedger,
     source_thread: str,
     thoughts: ThoughtLog | None = None,
-    max_thoughts: int = 5,
+    *,
+    working_memory: bool = False,
+    provider_reasoning: bool = False,
+    max_reasoning: int = 5,
 ) -> str:
     lineage = tasks.lineage(source_thread)
     spec = tasks.get(lineage[0])
@@ -58,15 +61,23 @@ def slim_brief(
         out += ["", "## Open TODOs"] + [f"- [{f.finding_id}] {f.text}" for f in todos]
     if unsourced:
         out += ["", f"({unsourced} unsourced finding(s) were dropped as untrusted.)"]
-    if thoughts is not None:
-        summaries = [t.summary for t in thoughts.for_threads(lineage) if t.summary][-max_thoughts:]
-        if summaries:
+    if thoughts is not None and working_memory:
+        latest = thoughts.for_threads(lineage, source="agent")[-1:]
+        if latest:
             out += [
                 "",
-                "## Prior reasoning (the earlier session's thinking summaries; NOT evidence)",
+                f"## Working memory at cut-off [{latest[0].thought_id}] (your own notes; hypotheses are unconfirmed)",
+                latest[0].text,
+            ]
+    if thoughts is not None and provider_reasoning:
+        texts = [t.text for t in thoughts.for_threads(lineage, source="provider") if t.text][-max_reasoning:]
+        if texts:
+            out += [
+                "",
+                "## Prior model reasoning (the earlier session's reasoning text; NOT evidence)",
                 "Use these only as leads. Verify anything here before relying on it.",
             ]
-            out += [f"- {s}" for s in summaries]
+            out += [f"- {t}" for t in texts]
     out += [
         "",
         "Before relying on a `ruled_out` finding, spot-check one with recall_event(<source id>). "

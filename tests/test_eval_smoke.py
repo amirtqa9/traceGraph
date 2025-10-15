@@ -7,7 +7,7 @@ def test_eval_runs_every_arm_end_to_end(tmp_path):
     report = tg_eval.run_eval(
         lambda: ScriptedChatModel(policy=debugging_policy),
         # Cut off after record_finding ran, before the answer.
-        k=2, cutoff=4, run_limit=20, data_dir=tmp_path,
+        k=2, cutoff=6, run_limit=20, data_dir=tmp_path,
     )
     assert report["source"]["tool_calls"] == 1
     assert report["source"]["sourced_findings"] == 1

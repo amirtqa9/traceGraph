@@ -26,14 +26,16 @@ from typing_extensions import TypedDict
 from tracegraph import BlobStore, EventLog, FindingsLedger, Recorder, TaskRegistry
 from tracegraph.findings import make_record_finding_tool
 from tracegraph.resume import make_recall_tool
-from tracegraph.thoughts import ThoughtLog
+from tracegraph.thoughts import ThoughtLog, make_record_thought_tool
 
 SYSTEM_PROMPT = """You are a careful debugging agent working in a read-only repository.
 
 Each tool result ends with an event ID like [event: ev_1234abcd5678]. Whenever you
 establish something worth keeping (a file you've ruled out, a suspect, a confirmed bug),
-call record_finding and cite the event IDs that support it. Your session may be cut off
-at any time, and a later session will only see your findings.
+call record_finding and cite the event IDs that support it. Whenever your plan or your
+suspicions change, call record_thought with your current hypotheses (with confidence and
+supporting event IDs), plan, open questions and next step. Your session may be cut off
+at any time, and a later session will only see your findings and working memory.
 
 When you are done, reply with a final line of the form:
 ANSWER: <path>::<function>"""
@@ -104,7 +106,7 @@ def components(store: BaseStore, project_id: str, data_dir: str | os.PathLike[st
         blobs=blobs,
         ledger=FindingsLedger(store, project_id, events),
         tasks=TaskRegistry(store, project_id),
-        thoughts=ThoughtLog(store, project_id, blobs),
+        thoughts=ThoughtLog(store, project_id, blobs, events),
     )
 
 
@@ -113,10 +115,11 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
         tg.events,
         tg.blobs,
         tool_kinds=TOOL_KINDS,
-        untracked=frozenset({"record_finding", "recall_event"}),
+        untracked=frozenset({"record_finding", "record_thought", "recall_event"}),
     )
     tools = workspace_tools(workspace) + [
         make_record_finding_tool(tg.ledger),
+        make_record_thought_tool(tg.thoughts),
         make_recall_tool(tg.events, tg.blobs),
     ]
     bound = model.bind_tools(tools)

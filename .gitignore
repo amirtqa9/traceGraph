@@ -7,3 +7,4 @@ spike/runs/
 *.sqlite
 *.sqlite-*
 .DS_Store
+*.egg-info/
