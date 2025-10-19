@@ -150,3 +150,36 @@ def make_recall_tool(events: EventLog, blobs: BlobStore) -> BaseTool:
         return f"{event.tool}({event.args}) returned:\n{output}"
 
     return recall_event
+
+
+# Generic compaction instruction, modeled on default agent-harness compaction. It
+# deliberately does not ask for constraints verbatim: this arm is the baseline.
+SELF_SUMMARY_PROMPT = (
+    "Your session is about to be reset and a fresh instance of you will continue the work "
+    "with no access to this conversation. Write a summary of the session so far: the task, "
+    "what you did, what you found, and what to do next. Reply with the summary only."
+)
+
+
+def render_transcript(messages: list[BaseMessage]) -> str:
+    """Plain-text transcript, so a summary request needs no tool definitions."""
+    lines = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            lines.append(f"USER: {message_text(m.content)}")
+        elif isinstance(m, AIMessage):
+            text = message_text(m.content).strip()
+            if text:
+                lines.append(f"ASSISTANT: {text}")
+            for tc in m.tool_calls:
+                lines.append(f"ASSISTANT CALLED {tc['name']}({tc['args']})")
+        elif isinstance(m, ToolMessage):
+            lines.append(f"TOOL RESULT: {message_text(m.content)}")
+    return "\n\n".join(lines)
+
+
+def self_summary(model, messages: list[BaseMessage]) -> str:
+    """The model's own compaction of `messages` (one call, no tools)."""
+    transcript = render_transcript(consistent_prefix(messages))
+    reply = model.invoke([HumanMessage(f"<transcript>\n{transcript}\n</transcript>\n\n{SELF_SUMMARY_PROMPT}")])
+    return message_text(reply.content).strip()

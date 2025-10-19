@@ -139,7 +139,8 @@ def test_thought_arms_run(tmp_path):
     report = tg_eval.run_eval(
         lambda: ScriptedChatModel(policy=debugging_policy),
         k=1, cutoff=6, run_limit=20, data_dir=tmp_path, arms=("slim_memory", "slim_reasoning"),
+        scenarios=("none",),
     )
     assert report["source"]["working_memory_states"] == 1
     assert report["source"]["provider_reasoning_states"] == 3
-    assert all(s["success_rate"] == 1.0 for s in report["summary"].values())
+    assert all(s["success_rate"] == 1.0 for s in report["summary"]["none"].values())

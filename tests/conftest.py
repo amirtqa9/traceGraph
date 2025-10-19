@@ -12,8 +12,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from spike.agent import build_agent, components
-from spike.eval import WORKSPACE
+from spike.eval import FIXTURE
 from tracegraph.events import EVENT_ID_RE, message_text
+from tracegraph.resume import SELF_SUMMARY_PROMPT
 
 _ids = itertools.count()
 
@@ -59,14 +60,21 @@ def debugging_policy(messages: list[BaseMessage]) -> AIMessage:
     so the same policy works for every resume arm.
     """
     text = "\n".join(message_text(m.content) for m in messages)
+    if SELF_SUMMARY_PROMPT in text:
+        return AIMessage(content="Task: find why page 2 repeats the last item of page 1. "
+                                 "Progress: suspected the pagination slicing. Next: read shop/pagination.py and answer.",
+                         response_metadata=ANTHROPIC_META)
     read = [m for m in messages if isinstance(m, ToolMessage) and "def paginate" in message_text(m.content)]
     recorded = "Recorded fd_" in text or re.search(r"\[fd_[0-9a-f]{12}\] \(fact\)", text)
     thought = THOUGHT_ID_RE.search(text)
     if recorded:
+        # Answer from the latest file content this context has seen; with only a stale
+        # finding (slim) or a stale read (full), that is the old answer.
+        function = "page_bounds" if read and "def page_bounds" in message_text(read[-1].content) else "paginate"
         return AIMessage(
             content=[
                 thinking("Finding confirms the off-by-one; answer."),
-                {"type": "text", "text": "The end index is off by one.\nANSWER: shop/pagination.py::paginate"},
+                {"type": "text", "text": f"The bounds are off by one.\nANSWER: shop/pagination.py::{function}"},
             ],
             response_metadata=ANTHROPIC_META,
         )
@@ -102,6 +110,6 @@ def harness(tmp_path):
 
     def make(policy=debugging_policy):
         model = ScriptedChatModel(policy=policy)
-        return build_agent(model, WORKSPACE, tg, checkpointer=InMemorySaver(), store=store)
+        return build_agent(model, FIXTURE, tg, checkpointer=InMemorySaver(), store=store)
 
     return tg, make
