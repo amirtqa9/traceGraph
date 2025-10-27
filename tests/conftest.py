@@ -12,7 +12,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
 from spike.agent import build_agent, components
-from spike.eval import FIXTURE
+from spike.tasks import FIXTURE
 from tracegraph.events import EVENT_ID_RE, message_text
 from tracegraph.resume import SELF_SUMMARY_PROMPT
 

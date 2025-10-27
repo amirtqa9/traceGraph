@@ -18,12 +18,13 @@ beat the cheap baselines? See PLAN.md §5.
 |---|---|
 | Recorder on ToolNode `wrap_tool_call` → events with citable `ev_` IDs | Read/write sets (M1) |
 | Content-addressed blob store for tool outputs | Staleness validation (M3) |
-| `record_finding` tool; cited sources checked against the event log | More fixture tasks (10–20) |
+| `record_finding` tool; cited sources checked against the event log | Live run of the eval (needs API key + budget) |
 | Verbatim task + constraints pinned per thread, with resume lineage | Action cache (M4), side-effect safety (M5) |
 | Thought state per node: agent working memory (`record_thought`) + provider reasoning normalized across Claude / OpenAI / Gemini / DeepSeek, indexed by checkpoint next to findings | Persistent backends (all in-memory for now) |
 | Thought → finding promotion (`from_thought`) | |
 | Eval arms: full / masked / self_summary / slim / slim_memory / slim_reasoning / scratch, graded from the event log | |
 | Scenarios: `none` and `bug_moved` (bug moves between sessions, so carried-over findings go stale) | |
+| 10 fixture tasks (planted bug + moved variant each), each validated by an executable symptom check | |
 
 Two kinds of record are kept apart throughout: **events** are written by the
 tool layer and the model cannot author them; **findings** are written by the model and
@@ -34,8 +35,9 @@ are trusted only as far as the events they cite.
 ```
 src/tracegraph/      library: canonical hashing, CAS, events/Recorder, findings, thoughts, tasks, resume, index
 spike/agent.py       minimal ReAct loop on StateGraph + ToolNode with TraceGraph attached
-spike/eval.py        M0 eval harness
-spike/fixtures/shop  fixture repo with one planted bug (shop/pagination.py::paginate, end index off by one)
+spike/eval.py        M0 eval harness (suite over tasks x scenarios x arms x k)
+spike/tasks.py       10 fixture tasks: symptom, planted patch, moved patch, executable symptom check
+spike/fixtures/shop  clean (bug-free) fixture repo; tasks patch bugs into copies
 tests/               offline tests with a scripted model; no API key needed
 archive/deepseek-v1/ original design docs (superseded)
 ```
@@ -46,7 +48,8 @@ archive/deepseek-v1/ original design docs (superseded)
 # The repo sits in iCloud-synced ~/Desktop: keep the venv in a *.nosync folder (see HANDOFF §3)
 python3 -m venv .venv.nosync && ln -s .venv.nosync .venv && .venv/bin/pip install -e ".[spike,dev]"
 .venv/bin/python -m pytest -q                      # offline
-ANTHROPIC_API_KEY=... .venv/bin/python -m spike.eval --k 3 --cutoff 7
+ANTHROPIC_API_KEY=... .venv/bin/python -m spike.eval --k 1 --tasks pagination_overlap   # small first run
+# full suite: 10 tasks x 2 scenarios x 7 arms x k runs (k=3 is 420 runs; mind the cost)
 ```
 
 The eval defaults to `claude-opus-5-5` at effort `medium` (`TG_MODEL`, `TG_EFFORT`

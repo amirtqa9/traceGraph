@@ -138,6 +138,7 @@ def test_copied_histories_carry_no_signed_blocks(harness):
 def test_thought_arms_run(tmp_path):
     report = tg_eval.run_eval(
         lambda: ScriptedChatModel(policy=debugging_policy),
+        tg_eval.TASKS["pagination_overlap"],
         k=1, cutoff=6, run_limit=20, data_dir=tmp_path, arms=("slim_memory", "slim_reasoning"),
         scenarios=("none",),
     )

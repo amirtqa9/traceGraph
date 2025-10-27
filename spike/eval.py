@@ -1,12 +1,15 @@
 """M0 eval: does resuming from findings beat the cheap baselines?
 
-1. A *source* run works on the task in its own copy of the fixture repo and is cut
-   off after `--cutoff` graph steps.
+Runs over the fixture tasks in `spike/tasks.py` (10 planted bugs in the `shop` repo).
+For each task:
+
+1. A *source* run works on the task in its own copy of the repo (bug planted) and is
+   cut off after `--cutoff` graph steps.
 2. For each *scenario*, a fresh copy of the repo is prepared:
-     none        unchanged
-     bug_moved   between sessions the bug moves: paginate() is fixed and the overlap
-                 now comes from a new helper page_bounds(), so the source session's
-                 findings are stale
+     none        the same planted bug
+     bug_moved   between sessions the bug moves: the original function is clean and the
+                 same symptom now comes from a different function, so the source
+                 session's findings are stale
 3. From the cut-off point, each arm starts a fresh thread K times per scenario:
      full            whole history (consistent prefix), thinking stripped
      masked          same, but all but the last 2 tool outputs replaced by event pointers
@@ -19,7 +22,8 @@
    the event log, not from the model's account), tokens and tool calls.
 
 Usage:
-    ANTHROPIC_API_KEY=... .venv/bin/python -m spike.eval --k 3 --cutoff 7
+    ANTHROPIC_API_KEY=... .venv/bin/python -m spike.eval --k 1 --cutoff 7 --tasks pagination_overlap
+Runs = tasks x scenarios x arms x k (all tasks, both scenarios, 7 arms, k=3 is 420 runs).
 """
 
 from __future__ import annotations
@@ -27,12 +31,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
 import statistics
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
@@ -42,6 +44,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.store.memory import InMemoryStore
 
 from spike.agent import build_agent, claude_model, components
+from spike.tasks import TASKS, FixtureTask, materialize
 from tracegraph.events import message_text
 from tracegraph.resume import (
     consistent_prefix,
@@ -53,54 +56,25 @@ from tracegraph.resume import (
 from tracegraph.tasks import TaskSpec
 
 HERE = Path(__file__).parent
-FIXTURE = HERE / "fixtures" / "shop"
 
-TASK = (
-    "Users report that page 2 of search results starts with the same item that ended "
-    "page 1. Find the function responsible."
-)
 CONSTRAINTS = (
     "Do not read, list or search anything under tests/.",
     "Do not modify any files.",
 )
 ARMS = ("full", "masked", "self_summary", "slim", "slim_memory", "slim_reasoning", "scratch")
+SCENARIOS = ("none", "bug_moved")
 RESUME_NOTE = "(Session resumed after an interruption. Continue the task.)"
 SUMMARY_HEADER = "Summary of your earlier session (written by you before a context reset):\n\n"
-ANSWER_RE = re.compile(r"ANSWER:\s*(\S+?)::(\w+)")
-
-BUG_MOVED_PAGINATION = '''from shop.utils import clamp
+ANSWER_RE = re.compile(r"ANSWER:\s*(\S+?)::([\w.]+)")
 
 
-def page_count(total, size):
-    return max(1, -(-total // size))
-
-
-def page_bounds(page, size):
-    start = (page - 1) * size
-    return max(0, start - 1), start + size
-
-
-def paginate(items, page, size):
-    """Return the items on 1-based `page`."""
-    page = clamp(page, 1, page_count(len(items), size))
-    start, end = page_bounds(page, size)
-    return items[start:end]
-'''
-
-
-@dataclass(frozen=True)
-class Scenario:
-    name: str
-    expected: tuple[str, str]  # (path, function)
-    files: dict[str, str] = field(default_factory=dict)  # applied between sessions
-
-
-SCENARIOS = {
-    "none": Scenario("none", ("shop/pagination.py", "paginate")),
-    "bug_moved": Scenario(
-        "bug_moved", ("shop/pagination.py", "page_bounds"), {"shop/pagination.py": BUG_MOVED_PAGINATION}
-    ),
-}
+def scenario_setup(task: FixtureTask, scenario: str) -> tuple[tuple, tuple[str, str]]:
+    """(patch to apply to the clean repo, expected answer) for a scenario."""
+    if scenario == "none":
+        return task.planted, task.expected
+    if scenario == "bug_moved":
+        return task.moved, task.moved_expected
+    raise ValueError(scenario)
 
 
 def config(thread_id: str, recursion_limit: int | None = None) -> dict:
@@ -108,13 +82,6 @@ def config(thread_id: str, recursion_limit: int | None = None) -> dict:
     if recursion_limit is not None:
         cfg["recursion_limit"] = recursion_limit
     return cfg
-
-
-def prepare_workspace(dest: Path, files: dict[str, str] | None = None) -> Path:
-    shutil.copytree(FIXTURE, dest, ignore=shutil.ignore_patterns("__pycache__"))
-    for rel, text in (files or {}).items():
-        (dest / rel).write_text(text)
-    return dest
 
 
 def run_thread(agent, thread_id: str, messages: list[BaseMessage], limit: int) -> tuple[list[BaseMessage], bool]:
@@ -160,9 +127,13 @@ def grade(new_messages: list[BaseMessage], events, expected: tuple[str, str]) ->
     final = message_text(ai[-1].content) if ai else ""
     match = ANSWER_RE.search(final)
     usage = [m.usage_metadata or {} for m in ai]
+    # "Cart.add" and "add" both count: compare the last dotted component.
+    correct = bool(
+        match and match.group(1).endswith(expected[0]) and match.group(2).split(".")[-1] == expected[1]
+    )
     return {
         "answer": match.group(0) if match else None,
-        "correct": bool(match and match.group(1).endswith(expected[0]) and match.group(2) == expected[1]),
+        "correct": correct,
         "violations": sum(is_violation(e.tool, e.args) for e in events),
         "tool_calls": len(events),
         "resume_context_tokens": usage[0].get("input_tokens", 0) if usage else 0,
@@ -173,43 +144,45 @@ def grade(new_messages: list[BaseMessage], events, expected: tuple[str, str]) ->
 
 def run_eval(
     model_factory: Callable[[], BaseChatModel],
+    task: FixtureTask,
     *,
     k: int,
     cutoff: int,
     run_limit: int,
     data_dir: Path,
     arms: tuple[str, ...] = ARMS,
-    scenarios: tuple[str, ...] = tuple(SCENARIOS),
+    scenarios: tuple[str, ...] = SCENARIOS,
 ) -> dict:
+    """One task: a source run, then every scenario x arm x k resumed runs."""
     data_dir.mkdir(parents=True, exist_ok=True)
     store = InMemoryStore()
-    tg = components(store, project_id="shop", data_dir=data_dir)
+    tg = components(store, project_id=task.name, data_dir=data_dir)
     model = model_factory()
 
-    source_ws = prepare_workspace(data_dir / "ws-source")
+    source_ws = materialize(data_dir / "ws-source", task.planted)
     source_agent = build_agent(model, source_ws, tg, checkpointer=InMemorySaver(), store=store)
     source_thread = f"source-{uuid.uuid4().hex[:8]}"
-    spec = tg.tasks.pin(TaskSpec(source_thread, TASK, CONSTRAINTS))
+    spec = tg.tasks.pin(TaskSpec(source_thread, task.prompt, CONSTRAINTS))
     source, _ = run_thread(source_agent, source_thread, [HumanMessage(spec.render())], cutoff)
     source_findings = tg.ledger.for_threads([source_thread])
     # One compaction per eval, shared by every self_summary run (as a harness would).
     summary = self_summary(model, source) if "self_summary" in arms else None
 
     runs = []
-    for scenario_name in scenarios:
-        scenario = SCENARIOS[scenario_name]
-        ws = prepare_workspace(data_dir / f"ws-{scenario.name}", scenario.files)
+    for scenario in scenarios:
+        patch, expected = scenario_setup(task, scenario)
+        ws = materialize(data_dir / f"ws-{scenario}", patch)
         agent = build_agent(model, ws, tg, checkpointer=InMemorySaver(), store=store)
         for arm in arms:
             for i in range(k):
-                thread = f"{scenario.name}-{arm}-{i}-{uuid.uuid4().hex[:6]}"
-                tg.tasks.pin(TaskSpec(thread, TASK, CONSTRAINTS, parent_thread=source_thread, resume_mode=arm))
+                thread = f"{scenario}-{arm}-{i}-{uuid.uuid4().hex[:6]}"
+                tg.tasks.pin(TaskSpec(thread, task.prompt, CONSTRAINTS, parent_thread=source_thread, resume_mode=arm))
                 seed = seed_messages(arm, source, tg, source_thread, spec, summary)
                 started = time.monotonic()
                 messages, hit_limit = run_thread(agent, thread, seed, run_limit)
-                result = grade(messages[len(seed):], tg.events.for_thread(thread), scenario.expected)
+                result = grade(messages[len(seed):], tg.events.for_thread(thread), expected)
                 runs.append(
-                    {"scenario": scenario.name, "arm": arm, "run": i, "thread": thread, "hit_limit": hit_limit,
+                    {"task": task.name, "scenario": scenario, "arm": arm, "run": i, "thread": thread, "hit_limit": hit_limit,
                      "seconds": round(time.monotonic() - started, 2), **result}
                 )
 
@@ -222,12 +195,25 @@ def run_eval(
             "sourced_findings": sum(f.sourced for f in source_findings),
             "working_memory_states": len(tg.thoughts.for_threads([source_thread], source="agent")),
             "provider_reasoning_states": len(tg.thoughts.for_threads([source_thread], source="provider")),
-            "already_answered": grade(source, [], SCENARIOS["none"].expected)["correct"],
+            "already_answered": grade(source, [], task.expected)["correct"],
             "self_summary": summary,
         },
         "runs": runs,
         "summary": summarize(runs),
     }
+
+
+def run_suite(
+    model_factory: Callable[[], BaseChatModel],
+    tasks: tuple[str, ...],
+    *,
+    data_dir: Path,
+    **kwargs,
+) -> dict:
+    """Every task in `tasks`; summary aggregates runs across tasks."""
+    reports = {name: run_eval(model_factory, TASKS[name], data_dir=data_dir / name, **kwargs) for name in tasks}
+    runs = [r for rep in reports.values() for r in rep["runs"]]
+    return {"tasks": reports, "summary": summarize(runs)}
 
 
 def summarize(runs: list[dict]) -> dict:
@@ -251,11 +237,12 @@ def summarize(runs: list[dict]) -> dict:
 
 
 def print_summary(report: dict) -> None:
-    src = report["source"]
-    print(
-        f"source: {src['tool_calls']} tool calls, {src['sourced_findings']}/{src['findings']} findings sourced, "
-        f"{src['working_memory_states']} working-memory states, already answered: {src['already_answered']}"
-    )
+    for name, task_report in report["tasks"].items():
+        src = task_report["source"]
+        print(
+            f"{name}: source {src['tool_calls']} tool calls, {src['sourced_findings']}/{src['findings']} findings "
+            f"sourced, {src['working_memory_states']} working-memory states, already answered: {src['already_answered']}"
+        )
     for scenario, by_arm in report["summary"].items():
         print(f"\nscenario: {scenario}")
         print(f"{'arm':<15} {'n':>3} {'success':>8} {'violations':>10} {'resume ctx':>11} {'total in':>9} {'tools':>6}")
@@ -268,18 +255,21 @@ def print_summary(report: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--k", type=int, default=3, help="runs per arm per scenario")
+    parser.add_argument("--k", type=int, default=3, help="runs per arm per scenario per task")
     parser.add_argument("--cutoff", type=int, default=7, help="graph steps before the source run is cut off")
     parser.add_argument("--run-limit", type=int, default=40, help="graph step limit per resumed run")
     parser.add_argument("--model", default=None, help="Claude model ID (default: $TG_MODEL or claude-opus-5-5)")
     parser.add_argument("--arms", default=",".join(ARMS))
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
+    parser.add_argument("--tasks", default=",".join(TASKS), help=f"comma list from: {', '.join(TASKS)}")
     args = parser.parse_args()
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     out_dir = HERE / "runs" / run_id
-    report = run_eval(
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = run_suite(
         lambda: claude_model(args.model),
+        tuple(t for t in args.tasks.split(",") if t),
         k=args.k,
         cutoff=args.cutoff,
         run_limit=args.run_limit,
