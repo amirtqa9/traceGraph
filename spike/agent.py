@@ -139,11 +139,15 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
 
 
 def claude_model(model_id: str | None = None) -> BaseChatModel:
+    """Claude via the Messages API, or via the local `claude -p` shim when TG_BASE_URL is set."""
     from langchain_anthropic import ChatAnthropic
 
+    shim_url = os.environ.get("TG_BASE_URL")
+    endpoint = {"base_url": shim_url, "api_key": os.environ.get("ANTHROPIC_API_KEY", "claude-p-shim")} if shim_url else {}
     return ChatAnthropic(
         model=model_id or os.environ.get("TG_MODEL", "claude-opus-5-5"),
         max_tokens=16000,
+        **endpoint,
         # "summarized" returns readable thinking summaries for the thought state;
         # the default ("omitted") would leave them empty.
         thinking={"type": "adaptive", "display": "summarized"},

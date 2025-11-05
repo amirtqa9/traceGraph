@@ -18,7 +18,7 @@ beat the cheap baselines? See PLAN.md §5.
 |---|---|
 | Recorder on ToolNode `wrap_tool_call` → events with citable `ev_` IDs | Read/write sets (M1) |
 | Content-addressed blob store for tool outputs | Staleness validation (M3) |
-| `record_finding` tool; cited sources checked against the event log | Live run of the eval (needs API key + budget) |
+| `record_finding` tool; cited sources checked against the event log | Live run of the eval (API key, or the `claude -p` shim) |
 | Verbatim task + constraints pinned per thread, with resume lineage | Action cache (M4), side-effect safety (M5) |
 | Thought state per node: agent working memory (`record_thought`) + provider reasoning normalized across Claude / OpenAI / Gemini / DeepSeek, indexed by checkpoint next to findings | Persistent backends (all in-memory for now) |
 | Thought → finding promotion (`from_thought`) | |
@@ -36,6 +36,7 @@ are trusted only as far as the events they cite.
 src/tracegraph/      library: canonical hashing, CAS, events/Recorder, findings, thoughts, tasks, resume, index
 spike/agent.py       minimal ReAct loop on StateGraph + ToolNode with TraceGraph attached
 spike/eval.py        M0 eval harness (suite over tasks x scenarios x arms x k)
+spike/claude_p_api.py local Messages API stand-in backed by `claude -p` (TG_BASE_URL)
 spike/tasks.py       10 fixture tasks: symptom, planted patch, moved patch, executable symptom check
 spike/fixtures/shop  clean (bug-free) fixture repo; tasks patch bugs into copies
 tests/               offline tests with a scripted model; no API key needed
