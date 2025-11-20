@@ -25,6 +25,7 @@ from typing_extensions import TypedDict
 
 from tracegraph import BlobStore, EventLog, FindingsLedger, Recorder, TaskRegistry
 from tracegraph.findings import make_record_finding_tool
+from tracegraph.resources import FilesystemAdapter, ResourceRegistry, filesystem_tool_resources
 from tracegraph.resume import make_recall_tool
 from tracegraph.thoughts import ThoughtLog, make_record_thought_tool
 
@@ -110,12 +111,17 @@ def components(store: BaseStore, project_id: str, data_dir: str | os.PathLike[st
     )
 
 
-def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents, *, checkpointer, store):
+def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents, *, checkpointer, store,
+                cache=None):
+    fs = FilesystemAdapter(workspace)
     recorder = Recorder(
         tg.events,
         tg.blobs,
         tool_kinds=TOOL_KINDS,
         untracked=frozenset({"record_finding", "record_thought", "recall_event"}),
+        resources=filesystem_tool_resources(fs),
+        registry=ResourceRegistry(fs),
+        cache=cache,
     )
     tools = workspace_tools(workspace) + [
         make_record_finding_tool(tg.ledger),
