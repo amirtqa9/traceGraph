@@ -14,7 +14,7 @@ dependencies = [
 tracegraph = "tracegraph.cli:main"
 
 [project.optional-dependencies]
-spike = ["langchain-anthropic>=1.7,<1.8"]
+spike = ["langchain-anthropic>=1.7,<1.8", "langchain-ollama>=1.1,<1.2"]
 dev = ["pytest>=9"]
 
 [build-system]

@@ -9,3 +9,5 @@ spike/runs/
 .DS_Store
 *.egg-info/
 .venv.nosync/
+.env
+.env.*

@@ -144,6 +144,39 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
     return graph.compile(checkpointer=checkpointer, store=store)
 
 
+def load_dotenv(path: str | os.PathLike[str] = Path(__file__).resolve().parent.parent / ".env") -> None:
+    """Minimal .env loader: KEY=value lines; existing environment variables win."""
+    try:
+        lines = Path(path).read_text().splitlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def make_model(model_id: str | None = None) -> BaseChatModel:
+    """The eval's model: TG_PROVIDER=ollama (default when OLLAMA_API_KEY is set) or anthropic."""
+    load_dotenv()
+    provider = os.environ.get("TG_PROVIDER") or ("ollama" if os.environ.get("OLLAMA_API_KEY") else "anthropic")
+    return ollama_model(model_id) if provider == "ollama" else claude_model(model_id)
+
+
+def ollama_model(model_id: str | None = None) -> BaseChatModel:
+    """Ollama (cloud via OLLAMA_BASE_URL + OLLAMA_API_KEY, or a local server) with reasoning on."""
+    from langchain_ollama import ChatOllama
+
+    headers = {"Authorization": f"Bearer {os.environ['OLLAMA_API_KEY']}"} if os.environ.get("OLLAMA_API_KEY") else {}
+    return ChatOllama(
+        model=model_id or os.environ.get("TG_MODEL", "gpt-oss:120b"),
+        base_url=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        reasoning=True,
+        client_kwargs={"headers": headers, "timeout": float(os.environ.get("TG_TIMEOUT", "300"))},
+    )
+
+
 def claude_model(model_id: str | None = None) -> BaseChatModel:
     """Claude via the Messages API, or via the local `claude -p` shim when TG_BASE_URL is set."""
     from langchain_anthropic import ChatAnthropic

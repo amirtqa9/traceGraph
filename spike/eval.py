@@ -14,7 +14,9 @@ For each task:
      full            whole history (consistent prefix), thinking stripped
      masked          same, but all but the last 2 tool outputs replaced by event pointers
      self_summary    the model's own compaction of the history (computed once per eval)
-     slim            verbatim task + constraints + sourced findings only (TraceGraph)
+     slim            verbatim task + constraints + sourced findings only (TraceGraph M0)
+     slim_validated  slim + findings re-checked against the resumed workspace (M3): stale
+                     ones flagged with what changed, plus side effects and a startup routine
      slim_memory     slim + the agent's last working-memory snapshot (record_thought)
      slim_reasoning  slim + the provider's reasoning text, labeled as leads
      scratch         the task alone, as if nothing had happened
@@ -43,7 +45,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.store.memory import InMemoryStore
 
-from spike.agent import build_agent, claude_model, components
+from spike.agent import build_agent, components, make_model
 from spike.tasks import TASKS, FixtureTask, materialize
 from tracegraph.events import message_text
 from tracegraph.resume import (
@@ -53,7 +55,9 @@ from tracegraph.resume import (
     slim_brief,
     strip_reasoning,
 )
+from tracegraph.resources import FilesystemAdapter, ResourceRegistry
 from tracegraph.tasks import TaskSpec
+from tracegraph.validator import Validator
 
 HERE = Path(__file__).parent
 
@@ -61,7 +65,7 @@ CONSTRAINTS = (
     "Do not read, list or search anything under tests/.",
     "Do not modify any files.",
 )
-ARMS = ("full", "masked", "self_summary", "slim", "slim_memory", "slim_reasoning", "scratch")
+ARMS = ("full", "masked", "self_summary", "slim", "slim_validated", "slim_memory", "slim_reasoning", "scratch")
 SCENARIOS = ("none", "bug_moved")
 RESUME_NOTE = "(Session resumed after an interruption. Continue the task.)"
 SUMMARY_HEADER = "Summary of your earlier session (written by you before a context reset):\n\n"
@@ -95,7 +99,8 @@ def run_thread(agent, thread_id: str, messages: list[BaseMessage], limit: int) -
 
 
 def seed_messages(
-    arm: str, source: list[BaseMessage], tg, source_thread: str, spec: TaskSpec, summary: str | None
+    arm: str, source: list[BaseMessage], tg, source_thread: str, spec: TaskSpec, summary: str | None,
+    validator: Validator | None = None,
 ) -> list[BaseMessage]:
     history = strip_reasoning(consistent_prefix(source)) + [HumanMessage(RESUME_NOTE)]
     if arm == "full":
@@ -106,6 +111,8 @@ def seed_messages(
         return [HumanMessage(SUMMARY_HEADER + (summary or ""))]
     if arm == "slim":
         return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread))]
+    if arm == "slim_validated":
+        return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread, validator=validator, events=tg.events))]
     if arm == "slim_memory":
         return [HumanMessage(slim_brief(tg.tasks, tg.ledger, source_thread, tg.thoughts, working_memory=True))]
     if arm == "slim_reasoning":
@@ -173,11 +180,12 @@ def run_eval(
         patch, expected = scenario_setup(task, scenario)
         ws = materialize(data_dir / f"ws-{scenario}", patch)
         agent = build_agent(model, ws, tg, checkpointer=InMemorySaver(), store=store)
+        validator = Validator(ResourceRegistry(FilesystemAdapter(ws)))
         for arm in arms:
             for i in range(k):
                 thread = f"{scenario}-{arm}-{i}-{uuid.uuid4().hex[:6]}"
                 tg.tasks.pin(TaskSpec(thread, task.prompt, CONSTRAINTS, parent_thread=source_thread, resume_mode=arm))
-                seed = seed_messages(arm, source, tg, source_thread, spec, summary)
+                seed = seed_messages(arm, source, tg, source_thread, spec, summary, validator)
                 started = time.monotonic()
                 messages, hit_limit = run_thread(agent, thread, seed, run_limit)
                 result = grade(messages[len(seed):], tg.events.for_thread(thread), expected)
@@ -258,7 +266,8 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=3, help="runs per arm per scenario per task")
     parser.add_argument("--cutoff", type=int, default=7, help="graph steps before the source run is cut off")
     parser.add_argument("--run-limit", type=int, default=40, help="graph step limit per resumed run")
-    parser.add_argument("--model", default=None, help="Claude model ID (default: $TG_MODEL or claude-opus-5-5)")
+    parser.add_argument("--model", default=None,
+                        help="model ID (default: $TG_MODEL; gpt-oss:120b on Ollama, claude-opus-5-5 on Anthropic)")
     parser.add_argument("--arms", default=",".join(ARMS))
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
     parser.add_argument("--tasks", default=",".join(TASKS), help=f"comma list from: {', '.join(TASKS)}")
@@ -268,7 +277,7 @@ def main() -> None:
     out_dir = HERE / "runs" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     report = run_suite(
-        lambda: claude_model(args.model),
+        lambda: make_model(args.model),
         tuple(t for t in args.tasks.split(",") if t),
         k=args.k,
         cutoff=args.cutoff,

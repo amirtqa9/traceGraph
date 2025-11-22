@@ -46,6 +46,16 @@ def test_bug_moved_exposes_stale_memory(tmp_path):
         assert moved[arm]["success_rate"] == 1.0, arm  # re-read the changed file
 
 
+def test_validated_slim_resume_recovers_from_the_moved_bug(tmp_path):
+    """M3: the validator flags the finding as stale, so the agent re-checks instead of trusting it."""
+    report = run(tmp_path, k=1, arms=("slim", "slim_validated"))
+    assert report["summary"]["bug_moved"]["slim"]["success_rate"] == 0.0
+    assert report["summary"]["bug_moved"]["slim_validated"]["success_rate"] == 1.0
+    # When nothing changed, validation costs nothing: the finding is trusted, no re-reading.
+    assert report["summary"]["none"]["slim_validated"]["success_rate"] == 1.0
+    assert report["summary"]["none"]["slim_validated"]["mean_tool_calls"] == 0
+
+
 def test_scenario_workspaces_are_patched_copies(tmp_path):
     run(tmp_path, k=1, arms=("scratch",))
     clean = (FIXTURE / "shop/pagination.py").read_text()

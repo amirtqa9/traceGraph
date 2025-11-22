@@ -1,6 +1,7 @@
-"""Building the starting context for the M0 resume arms.
+"""Building the starting context for a resumed agent.
 
-- `slim_brief`: verbatim task + constraints + sourced findings only.
+- `slim_brief`: verbatim task + constraints + sourced findings, optionally validated
+  against the current world, plus side effects and thought state.
 - `mask_observations`: full history with old tool outputs replaced by their event IDs.
 - `consistent_prefix`: trims a history cut off mid tool loop.
 - `make_recall_tool`: just-in-time fetch of any event's original output.
@@ -16,6 +17,17 @@ from tracegraph.events import EVENT_ID_RE, EventLog, message_text
 from tracegraph.findings import FindingsLedger
 from tracegraph.tasks import TaskRegistry
 from tracegraph.thoughts import ThoughtLog
+from tracegraph.validator import Validator
+
+
+def _render_finding(f, verdict=None) -> str:
+    flag = "STALE " if verdict is not None and verdict.status == "stale" else ""
+    line = f"- [{f.finding_id}] {flag}({f.kind}) {f.text}\n  method: {f.method}; sources: {', '.join(f.sources)}"
+    if verdict is not None and verdict.status == "stale":
+        line += f"\n  changed since: {', '.join(verdict.changed_locators)}"
+    elif verdict is not None and verdict.status == "unverifiable":
+        line += "\n  (inputs not tracked; cannot be checked for staleness)"
+    return line
 
 
 def slim_brief(
@@ -27,7 +39,16 @@ def slim_brief(
     working_memory: bool = False,
     provider_reasoning: bool = False,
     max_reasoning: int = 5,
+    validator: Validator | None = None,
+    events: EventLog | None = None,
 ) -> str:
+    """The seed for a fresh agent: verbatim task + constraints + sourced findings.
+
+    With a `validator`, findings are checked against the current world: stale ones are
+    listed separately with what changed, and a startup routine tells the agent to re-check
+    them first. With `events`, side effects already performed (writes, external calls)
+    are listed so the resumed agent does not repeat or assume them undone.
+    """
     lineage = tasks.lineage(source_thread)
     spec = tasks.get(lineage[0])
     if spec is None:
@@ -37,6 +58,9 @@ def slim_brief(
     unsourced = len(findings) - len(sourced)
     todos = [f for f in sourced if f.kind == "todo"]
     carried = [f for f in sourced if f.kind != "todo"]
+    verdicts = {f.finding_id: validator.finding(f) for f in carried} if validator else {}
+    stale = [f for f in carried if verdicts.get(f.finding_id) and verdicts[f.finding_id].status == "stale"]
+    current = [f for f in carried if f not in stale]
 
     out = [
         "You are resuming a task from an earlier session. You have none of its "
@@ -48,25 +72,33 @@ def slim_brief(
     if spec.constraints:
         out += ["", "## Constraints (verbatim, still in force)"]
         out += [f"- {c}" for c in spec.constraints]
-    out += ["", "## Findings from earlier sessions (each backed by recorded tool events)"]
-    if carried:
-        for f in carried:
-            out.append(
-                f"- [{f.finding_id}] ({f.kind}) {f.text}\n"
-                f"  method: {f.method}; sources: {', '.join(f.sources)}"
-            )
-    else:
-        out.append("- (none)")
+    heading = "## Findings from earlier sessions (each backed by recorded tool events"
+    heading += "; inputs re-checked and unchanged)" if validator else ")"
+    out += ["", heading]
+    out += [_render_finding(f, verdicts.get(f.finding_id)) for f in current] or ["- (none)"]
+    if stale:
+        out += ["", "## Stale findings (their inputs changed since; do NOT rely on them)"]
+        out += [_render_finding(f, verdicts[f.finding_id]) for f in stale]
     if todos:
         out += ["", "## Open TODOs"] + [f"- [{f.finding_id}] {f.text}" for f in todos]
     if unsourced:
         out += ["", f"({unsourced} unsourced finding(s) were dropped as untrusted.)"]
+    if events is not None:
+        effects = [e for e in events.for_threads(lineage) if e.kind in ("write", "external")]
+        if effects:
+            out += ["", "## Side effects already performed (not undone; do not repeat blindly)"]
+            out += [f"- [{e.event_id}] {e.kind}: {e.tool}({e.args})" for e in effects]
     if thoughts is not None and working_memory:
         latest = thoughts.for_threads(lineage, source="agent")[-1:]
         if latest:
+            note = ""
+            if validator is not None and events is not None:
+                verdict = validator.thought(latest[0], events)
+                if verdict.status == "stale":
+                    note = f" (inputs changed since: {', '.join(verdict.changed_locators)})"
             out += [
                 "",
-                f"## Working memory at cut-off [{latest[0].thought_id}] (your own notes; hypotheses are unconfirmed)",
+                f"## Working memory at cut-off [{latest[0].thought_id}] (your own notes; hypotheses are unconfirmed){note}",
                 latest[0].text,
             ]
     if thoughts is not None and provider_reasoning:
@@ -78,11 +110,13 @@ def slim_brief(
                 "Use these only as leads. Verify anything here before relying on it.",
             ]
             out += [f"- {t}" for t in texts]
-    out += [
-        "",
-        "Before relying on a `ruled_out` finding, spot-check one with recall_event(<source id>). "
-        "Do not redo work the findings already cover unless a spot-check disagrees.",
-    ]
+    out += ["", "## Startup"]
+    if stale:
+        out.append("1. Re-check the stale findings first: the files listed changed after they were concluded.")
+    out.append(
+        f"{2 if stale else 1}. Before relying on a `ruled_out` finding, spot-check one with recall_event(<source id>)."
+    )
+    out.append(f"{3 if stale else 2}. Do not redo work the current findings already cover unless a check disagrees.")
     return "\n".join(out)
 
 

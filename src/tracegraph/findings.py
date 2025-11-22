@@ -1,9 +1,13 @@
 """Model-authored findings with sources checked against the event log.
 
 A finding is a claim ("files 1-10 checked for the null deref, none found"). It
-is trusted only as far as the tool events it cites: cited IDs are checked against
-the EventLog, unknown ones are kept as `rejected_sources`, and a finding with no
-verified source is "unsourced" and left out of slim resume.
+is trusted only as far as what it cites: tool events (`ev_...`) and earlier findings
+(`fd_...`). Cited IDs are checked against the logs, unknown ones are kept as
+`rejected_sources`, and a finding with no verified source is "unsourced" and left out
+of slim resume.
+
+Its `read_set` is the union of its sources' read sets, transitively: a finding built on
+another finding goes stale when anything under the first one changes.
 
 Findings never change. A correction is a new finding that `supersedes` the
 old one; nothing is rewritten in place.
@@ -11,7 +15,7 @@ old one; nothing is rewritten in place.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Annotated, Any, Literal
 
 from langchain_core.messages import ToolMessage
@@ -22,6 +26,7 @@ from langgraph.types import Command
 
 from tracegraph.canonical import short_id
 from tracegraph.events import EventLog
+from tracegraph.schema import SCHEMA_VERSION, check_schema
 
 FindingKind = Literal["fact", "ruled_out", "hypothesis", "todo", "decision"]
 
@@ -34,11 +39,13 @@ class Finding:
     text: str
     kind: FindingKind
     method: str
-    sources: tuple[str, ...]  # verified event IDs
+    sources: tuple[str, ...]  # verified event and finding IDs
     rejected_sources: tuple[str, ...]  # cited IDs with no matching event
     author: str = "agent"
     supersedes: str | None = None
     promoted_from: str | None = None  # thought ID this finding confirms, if any
+    read_set: dict[str, str] = field(default_factory=dict)  # transitive inputs
+    schema_version: int = SCHEMA_VERSION
 
     @property
     def sourced(self) -> bool:
@@ -53,6 +60,7 @@ class Finding:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Finding":
         value = dict(value)
+        check_schema(value, "finding")
         value["sources"] = tuple(value["sources"])
         value["rejected_sources"] = tuple(value["rejected_sources"])
         return cls(**value)
@@ -80,7 +88,14 @@ class FindingsLedger:
         promoted_from: str | None = None,
     ) -> Finding:
         cited = list(dict.fromkeys(cited))  # dedupe, keep order
-        verified = tuple(c for c in cited if self.events.get(c) is not None)
+        read_set: dict[str, str] = {}
+        verified_list = []
+        for c in cited:
+            source = self.events.get(c) if c.startswith("ev_") else self.get(c) if c.startswith("fd_") else None
+            if source is not None:
+                verified_list.append(c)
+                read_set.update(source.read_set)
+        verified = tuple(verified_list)
         rejected = tuple(c for c in cited if c not in verified)
         identity = [self.project_id, thread_id, text, kind, method, sorted(verified), supersedes, promoted_from]
         finding = Finding(
@@ -95,6 +110,7 @@ class FindingsLedger:
             author=author,
             supersedes=supersedes,
             promoted_from=promoted_from,
+            read_set=read_set,
         )
         self.store.put(self.namespace, finding.finding_id, finding.to_dict(), index=False)
         return finding
@@ -131,7 +147,8 @@ def make_record_finding_tool(ledger: FindingsLedger) -> BaseTool:
             text: The conclusion, self-contained (e.g. "pagination.py: paginate() is correct for page 1").
             kind: fact | ruled_out | hypothesis | todo | decision.
             method: How you established it (which tool, what you looked for).
-            sources: The `ev_...` event IDs (shown under each tool result) that support it.
+            sources: The `ev_...` event IDs (shown under each tool result) and/or earlier `fd_...`
+                finding IDs that support it.
             supersedes: ID of an earlier finding this one corrects, if any.
             from_thought: ID of the working-memory thought (th_...) whose hypothesis this confirms, if any.
         """

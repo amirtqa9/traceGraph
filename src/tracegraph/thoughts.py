@@ -50,6 +50,8 @@ PROVIDER_PROFILES: dict[str, tuple[TextKind, ReplayScope]] = {
     "google_vertexai": ("summary", "provider-input"),
     # reasoning_content is visible text and is not meant to be sent back.
     "deepseek": ("visible", "none"),
+    # Ollama (local or cloud) returns open-weight models' reasoning as visible text.
+    "ollama": ("visible", "none"),
 }
 OPAQUE_KEYS = ("signature", "encrypted_content", "data", "thought_signature")
 
