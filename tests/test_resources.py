@@ -110,3 +110,17 @@ def test_recorder_records_read_sets_and_redacts(harness, tmp_path):
     shown = next(m for m in out["messages"] if isinstance(m, ToolMessage)).content
     for text in (stored, shown):
         assert "zzzz" not in text and "[REDACTED:anthropic_key]" in text and "DEBUG = True" in text
+
+
+def test_tool_errors_become_results_not_crashes(harness, tmp_path):
+    """Real models send bad input (gpt-oss sent grep an unterminated regex in the first live run)."""
+    tg, _ = harness
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    steps = iter([call("grep", pattern="def (paginate"), call("read_file", path="nope.py"), AIMessage("done")])
+    agent = build_agent(ScriptedChatModel(policy=lambda m: next(steps)), tmp_path, tg,
+                        checkpointer=InMemorySaver(), store=tg.events.store)
+    out = agent.invoke({"messages": [HumanMessage("go")]}, {"configurable": {"thread_id": "e1"}})
+    errors = [m for m in out["messages"] if isinstance(m, ToolMessage)]
+    assert [m.status for m in errors] == ["error", "error"]
+    assert [e.status for e in tg.events.for_thread("e1")] == ["error", "error"]

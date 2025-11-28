@@ -25,6 +25,7 @@ from typing_extensions import TypedDict
 
 from tracegraph import BlobStore, EventLog, FindingsLedger, Recorder, TaskRegistry
 from tracegraph.findings import make_record_finding_tool
+from tracegraph.cache import ActionCache
 from tracegraph.resources import FilesystemAdapter, ResourceRegistry, filesystem_tool_resources
 from tracegraph.resume import make_recall_tool
 from tracegraph.thoughts import ThoughtLog, make_record_thought_tool
@@ -112,15 +113,17 @@ def components(store: BaseStore, project_id: str, data_dir: str | os.PathLike[st
 
 
 def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents, *, checkpointer, store,
-                cache=None):
+                cache_mode: str = "off"):
     fs = FilesystemAdapter(workspace)
+    registry = ResourceRegistry(fs)
+    cache = ActionCache(store, tg.events.project_id, tg.events, registry, cache_mode) if cache_mode != "off" else None
     recorder = Recorder(
         tg.events,
         tg.blobs,
         tool_kinds=TOOL_KINDS,
         untracked=frozenset({"record_finding", "record_thought", "recall_event"}),
         resources=filesystem_tool_resources(fs),
-        registry=ResourceRegistry(fs),
+        registry=registry,
         cache=cache,
     )
     tools = workspace_tools(workspace) + [
@@ -137,7 +140,9 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
 
     graph = StateGraph(AgentState)
     graph.add_node("agent", call_model)
-    graph.add_node("tools", ToolNode(tools, wrap_tool_call=recorder.wrap_tool_call))
+    # handle_tool_errors=True: a failing tool (bad regex, missing file) becomes an error result
+    # the model can react to, instead of an exception that ends the run.
+    graph.add_node("tools", ToolNode(tools, wrap_tool_call=recorder.wrap_tool_call, handle_tool_errors=True))
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", tools_condition)
     graph.add_edge("tools", "agent")

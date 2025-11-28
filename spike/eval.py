@@ -47,6 +47,7 @@ from langgraph.store.memory import InMemoryStore
 
 from spike.agent import build_agent, components, make_model
 from spike.tasks import TASKS, FixtureTask, materialize
+from tracegraph.cache import cache_stats
 from tracegraph.events import message_text
 from tracegraph.resume import (
     consistent_prefix,
@@ -122,6 +123,14 @@ def seed_messages(
     raise ValueError(arm)
 
 
+def interrupt_before_answer(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Drop a trailing final answer (AI turn without tool calls) from a source history."""
+    msgs = list(messages)
+    while msgs and isinstance(msgs[-1], AIMessage) and not msgs[-1].tool_calls:
+        msgs.pop()
+    return msgs
+
+
 def is_violation(tool: str, args: dict) -> bool:
     if tool not in ("read_file", "list_files", "grep"):
         return False
@@ -130,6 +139,7 @@ def is_violation(tool: str, args: dict) -> bool:
 
 
 def grade(new_messages: list[BaseMessage], events, expected: tuple[str, str]) -> dict:
+    cache = cache_stats(events)
     ai = [m for m in new_messages if isinstance(m, AIMessage)]
     final = message_text(ai[-1].content) if ai else ""
     match = ANSWER_RE.search(final)
@@ -143,6 +153,7 @@ def grade(new_messages: list[BaseMessage], events, expected: tuple[str, str]) ->
         "correct": correct,
         "violations": sum(is_violation(e.tool, e.args) for e in events),
         "tool_calls": len(events),
+        "cache_hits": cache.served + cache.would_hit,
         "resume_context_tokens": usage[0].get("input_tokens", 0) if usage else 0,
         "input_tokens": sum(u.get("input_tokens", 0) for u in usage),
         "output_tokens": sum(u.get("output_tokens", 0) for u in usage),
@@ -159,6 +170,7 @@ def run_eval(
     data_dir: Path,
     arms: tuple[str, ...] = ARMS,
     scenarios: tuple[str, ...] = SCENARIOS,
+    cache_mode: str = "advisory",
 ) -> dict:
     """One task: a source run, then every scenario x arm x k resumed runs."""
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -167,10 +179,14 @@ def run_eval(
     model = model_factory()
 
     source_ws = materialize(data_dir / "ws-source", task.planted)
-    source_agent = build_agent(model, source_ws, tg, checkpointer=InMemorySaver(), store=store)
+    source_agent = build_agent(model, source_ws, tg, checkpointer=InMemorySaver(), store=store, cache_mode=cache_mode)
     source_thread = f"source-{uuid.uuid4().hex[:8]}"
     spec = tg.tasks.pin(TaskSpec(source_thread, task.prompt, CONSTRAINTS))
-    source, _ = run_thread(source_agent, source_thread, [HumanMessage(spec.render())], cutoff)
+    full_source, _ = run_thread(source_agent, source_thread, [HumanMessage(spec.render())], cutoff)
+    already_answered = grade(full_source, [], task.expected)["correct"]
+    # An interruption happens before the answer: if the source finished within the cutoff,
+    # resume from just before its final answer so every arm still has work to do.
+    source = interrupt_before_answer(full_source)
     source_findings = tg.ledger.for_threads([source_thread])
     # One compaction per eval, shared by every self_summary run (as a harness would).
     summary = self_summary(model, source) if "self_summary" in arms else None
@@ -179,7 +195,7 @@ def run_eval(
     for scenario in scenarios:
         patch, expected = scenario_setup(task, scenario)
         ws = materialize(data_dir / f"ws-{scenario}", patch)
-        agent = build_agent(model, ws, tg, checkpointer=InMemorySaver(), store=store)
+        agent = build_agent(model, ws, tg, checkpointer=InMemorySaver(), store=store, cache_mode=cache_mode)
         validator = Validator(ResourceRegistry(FilesystemAdapter(ws)))
         for arm in arms:
             for i in range(k):
@@ -187,11 +203,17 @@ def run_eval(
                 tg.tasks.pin(TaskSpec(thread, task.prompt, CONSTRAINTS, parent_thread=source_thread, resume_mode=arm))
                 seed = seed_messages(arm, source, tg, source_thread, spec, summary, validator)
                 started = time.monotonic()
-                messages, hit_limit = run_thread(agent, thread, seed, run_limit)
-                result = grade(messages[len(seed):], tg.events.for_thread(thread), expected)
+                try:
+                    messages, hit_limit = run_thread(agent, thread, seed, run_limit)
+                    result = grade(messages[len(seed):], tg.events.for_thread(thread), expected)
+                    error = None
+                except Exception as exc:  # one failed run (API/network) must not sink the eval
+                    hit_limit = False
+                    result = grade([], tg.events.for_thread(thread), expected)
+                    error = f"{type(exc).__name__}: {str(exc)[:300]}"
                 runs.append(
-                    {"task": task.name, "scenario": scenario, "arm": arm, "run": i, "thread": thread, "hit_limit": hit_limit,
-                     "seconds": round(time.monotonic() - started, 2), **result}
+                    {"task": task.name, "scenario": scenario, "arm": arm, "run": i, "thread": thread,
+                     "hit_limit": hit_limit, "error": error, "seconds": round(time.monotonic() - started, 2), **result}
                 )
 
     return {
@@ -203,7 +225,9 @@ def run_eval(
             "sourced_findings": sum(f.sourced for f in source_findings),
             "working_memory_states": len(tg.thoughts.for_threads([source_thread], source="agent")),
             "provider_reasoning_states": len(tg.thoughts.for_threads([source_thread], source="provider")),
-            "already_answered": grade(source, [], task.expected)["correct"],
+            "already_answered": already_answered,
+            "source_messages": len(full_source),
+            "resumed_from_messages": len(source),
             "self_summary": summary,
         },
         "runs": runs,
@@ -234,9 +258,11 @@ def summarize(runs: list[dict]) -> dict:
                 "n": len(rs),
                 "success_rate": sum(r["correct"] for r in rs) / len(rs),
                 "violation_runs": sum(r["violations"] > 0 for r in rs),
+                "error_runs": sum(bool(r.get("error")) for r in rs),
                 "mean_resume_context_tokens": statistics.mean(r["resume_context_tokens"] for r in rs),
                 "mean_total_input_tokens": statistics.mean(r["input_tokens"] for r in rs),
                 "mean_tool_calls": statistics.mean(r["tool_calls"] for r in rs),
+                "mean_cache_hits": statistics.mean(r.get("cache_hits", 0) for r in rs),
             }
             for arm, rs in by_arm.items()
         }
@@ -270,6 +296,8 @@ def main() -> None:
                         help="model ID (default: $TG_MODEL; gpt-oss:120b on Ollama, claude-opus-5-5 on Anthropic)")
     parser.add_argument("--arms", default=",".join(ARMS))
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
+    parser.add_argument("--cache", default="advisory", choices=("off", "advisory", "enforce"),
+                        help="action cache mode for every agent (default advisory: measure, never serve)")
     parser.add_argument("--tasks", default=",".join(TASKS), help=f"comma list from: {', '.join(TASKS)}")
     args = parser.parse_args()
 
@@ -285,6 +313,7 @@ def main() -> None:
         data_dir=out_dir / "data",
         arms=tuple(a for a in args.arms.split(",") if a),
         scenarios=tuple(s for s in args.scenarios.split(",") if s),
+        cache_mode=args.cache,
     )
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
     print_summary(report)

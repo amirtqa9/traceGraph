@@ -85,6 +85,16 @@ def test_grading_accepts_qualified_names():
         assert graded["correct"] is ok, answer
 
 
+def test_source_is_interrupted_before_its_answer():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    tc = {"name": "read_file", "args": {}, "id": "a"}
+    msgs = [HumanMessage("go"), AIMessage("", tool_calls=[tc]), ToolMessage("x", tool_call_id="a"),
+            AIMessage("ANSWER: shop/a.py::f")]
+    assert tg_eval.interrupt_before_answer(msgs) == msgs[:3]
+    assert tg_eval.interrupt_before_answer(msgs[:3]) == msgs[:3]
+
+
 def test_violations_come_from_the_event_log():
     assert tg_eval.is_violation("read_file", {"path": "tests/test_shop.py"})
     assert tg_eval.is_violation("list_files", {"path": "./tests"})
