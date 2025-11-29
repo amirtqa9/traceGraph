@@ -10,6 +10,7 @@ Two kinds of record are kept strictly apart:
 
 from tracegraph.canonical import canonical_json, content_hash
 from tracegraph.cas import BlobStore
+from tracegraph.core import TraceGraph
 from tracegraph.events import ActionEvent, EventLog, Recorder
 from tracegraph.findings import Finding, FindingsLedger, make_record_finding_tool
 from tracegraph.tasks import TaskRegistry, TaskSpec
@@ -23,6 +24,7 @@ __all__ = [
     "Recorder",
     "TaskRegistry",
     "TaskSpec",
+    "TraceGraph",
     "canonical_json",
     "content_hash",
     "make_record_finding_tool",

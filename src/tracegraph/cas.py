@@ -40,3 +40,17 @@ class BlobStore:
 
     def has(self, ref: str) -> bool:
         return self._path(ref).exists()
+
+    def refs(self) -> list[str]:
+        return sorted(
+            f"sha256:{p.parent.name}{p.name}" for p in self.root.glob("??/*") if p.is_file() and len(p.name) == 62
+        )
+
+    def delete(self, ref: str) -> int:
+        """Remove a blob; returns bytes freed (0 if it was not there)."""
+        path = self._path(ref)
+        if not path.exists():
+            return 0
+        size = path.stat().st_size
+        path.unlink()
+        return size

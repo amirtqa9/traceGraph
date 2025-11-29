@@ -119,6 +119,10 @@ class FindingsLedger:
         item = self.store.get(self.namespace, finding_id)
         return Finding.from_dict(item.value) if item else None
 
+    def all(self, limit: int = 1_000_000) -> list[Finding]:
+        items = sorted(self.store.search(self.namespace, limit=limit), key=lambda it: it.created_at)
+        return [Finding.from_dict(it.value) for it in items]
+
     def for_threads(self, thread_ids: list[str], limit: int = 10_000) -> list[Finding]:
         """Current findings across `thread_ids`, oldest first, superseded ones removed."""
         items = []

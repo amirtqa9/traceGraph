@@ -213,6 +213,10 @@ class ThoughtLog:
             return [s for s in states if s.source != "agent"]
         return states
 
+    def all(self, limit: int = 1_000_000) -> list[ThoughtState]:
+        items = sorted(self.store.search(self.namespace, limit=limit), key=lambda it: it.created_at)
+        return [ThoughtState.from_dict(it.value) for it in items]
+
     def raw(self, thought: ThoughtState) -> dict[str, Any] | None:
         return json.loads(self.blobs.get(thought.opaque_ref)) if thought.opaque_ref else None
 

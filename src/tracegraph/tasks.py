@@ -46,6 +46,9 @@ class TaskRegistry:
         value["constraints"] = tuple(value["constraints"])
         return TaskSpec(**value)
 
+    def all(self, limit: int = 1_000_000) -> list[TaskSpec]:
+        return [s for s in (self.get(it.key) for it in self.store.search(self.namespace, limit=limit)) if s]
+
     def lineage(self, thread_id: str) -> list[str]:
         """This thread and every thread it was resumed from, oldest first."""
         chain: list[str] = []
