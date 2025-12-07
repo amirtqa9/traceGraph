@@ -106,3 +106,63 @@ def test_policy_decisions_are_explained_and_logged(tmp_path):
     log.record("t1", decide(1, 10))
     assert [x["action"] for x in log.for_thread("t1")] == ["slim_resume", "continue"]
     tg.close()
+
+
+def test_readme_usage_with_facade_only(tmp_path):
+    """The README's wiring, without any spike code."""
+    import operator
+    from typing import Annotated
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+    from langgraph.graph import START, StateGraph
+    from langgraph.graph.message import add_messages
+    from langgraph.prebuilt import ToolNode, tools_condition
+    from typing_extensions import TypedDict
+
+    from conftest import call
+    from tracegraph.events import EVENT_ID_RE
+    from tracegraph.resources import filesystem_tool_resources
+
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / "a.py").write_text("def f():\n    return 1\n")
+
+    class State(TypedDict):
+        messages: Annotated[list, add_messages]
+        tg_findings: Annotated[list[str], operator.add]
+        tg_thoughts: Annotated[list[str], operator.add]
+
+    tg = TraceGraph.open(tmp_path / ".tracegraph", "my-repo", workspace=tmp_path / "repo")
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read a file."""
+        return (tmp_path / "repo" / path).read_text()
+
+    def policy(messages):
+        results = [m for m in messages if m.type == "tool"]
+        if not results:
+            return call("read_file", path="a.py")
+        if len(results) == 1:
+            ev = EVENT_ID_RE.search(results[0].content).group(1)
+            return call("record_finding", text="f() returns 1", kind="fact", method="read a.py", sources=[ev])
+        return AIMessage("done")
+
+    model = ScriptedChatModel(policy=policy)
+    tools = [read_file] + tg.tools()
+    recorder = tg.recorder({"read_file": "read"}, filesystem_tool_resources(tg.fs))
+    g = StateGraph(State)
+    g.add_node("agent", lambda s: {"messages": [model.invoke(s["messages"])]})
+    g.add_node("tools", ToolNode(tools, wrap_tool_call=recorder.wrap_tool_call, handle_tool_errors=True))
+    g.add_edge(START, "agent")
+    g.add_conditional_edges("agent", tools_condition)
+    g.add_edge("tools", "agent")
+    app = g.compile(checkpointer=tg.checkpointer(), store=tg.store)
+
+    tg.tasks.pin(TaskSpec("thread-1", "Describe f()."))
+    out = app.invoke({"messages": [HumanMessage("go")]}, {"configurable": {"thread_id": "thread-1"}})
+    assert len(out["tg_findings"]) == 1
+    assert "f() returns 1" in tg.brief("thread-1")
+    (tmp_path / "repo" / "a.py").write_text("def f():\n    return 2\n")
+    assert "## Stale findings" in tg.brief("thread-1")
+    tg.close()

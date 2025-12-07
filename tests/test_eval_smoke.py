@@ -99,3 +99,18 @@ def test_violations_come_from_the_event_log():
     assert tg_eval.is_violation("read_file", {"path": "tests/test_shop.py"})
     assert tg_eval.is_violation("list_files", {"path": "./tests"})
     assert not tg_eval.is_violation("read_file", {"path": "shop/pagination.py"})
+
+
+def test_analyze_renders_tables_with_intervals(tmp_path):
+    from spike.analyze import render, wilson
+
+    lo, hi = wilson(3, 3)
+    assert 0.4 < lo < 0.5 and hi == 1.0
+    assert wilson(0, 0) == (0.0, 0.0)
+    report = tg_eval.run_suite(
+        lambda: ScriptedChatModel(policy=debugging_policy), ("pagination_overlap",),
+        k=1, cutoff=6, run_limit=20, data_dir=tmp_path, arms=("slim", "slim_validated"),
+    )
+    text = render(report)
+    assert "### Scenario `bug_moved`" in text and "| slim_validated | 1 | 100% |" in text
+    assert "| pagination_overlap | 0/1 | 1/1 |" in text  # bug_moved: slim fails, validated recovers
