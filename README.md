@@ -7,10 +7,7 @@ what each conclusion rests on, and whether it is still true**. A fresh agent can
 resume from a small, validated state instead of the full history, and an "already
 done" check can reuse earlier work only when its inputs are unchanged.
 
-- **Spec:** [PLAN.md](PLAN.md)
-- **Findings:** [docs/paper.md](docs/paper.md)
-- **Session log and next steps:** [HANDOFF.md](HANDOFF.md)
-- **Original design docs** (superseded, kept for reference): [`archive/deepseek-v1/`](archive/deepseek-v1/)
+Design, evaluation and findings: [docs/paper.md](docs/paper.md).
 
 ## What it does
 
@@ -73,7 +70,8 @@ tracegraph --data .tracegraph --project my-repo gc --older-than-days 30
 ## Install and test
 
 ```bash
-# This repo sits in iCloud-synced ~/Desktop: keep the venv in a *.nosync folder (see HANDOFF §3)
+# On an iCloud-synced folder (e.g. ~/Desktop), keep the venv in a *.nosync folder: iCloud sets the
+# macOS hidden flag on the editable-install .pth file, and Python 3.12 then skips it.
 python3 -m venv .venv.nosync && ln -s .venv.nosync .venv
 .venv/bin/pip install -e ".[spike,dev]"
 .venv/bin/python -m pytest -q          # offline, scripted model, no keys needed

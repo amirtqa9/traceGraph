@@ -14,7 +14,7 @@ How a request is served:
   validated against that tool's own input schema (one `anyOf` branch per tool).
 - The reply is returned as a Messages API response with `text` and `tool_use` blocks.
 
-Simulation limits (see HANDOFF.md):
+Simulation limits:
 - `claude -p` returns no thinking blocks, so responses carry none. Under the shim the
   provider-reasoning thought state stays empty and the `slim_reasoning` arm matches `slim`.
   Agent working memory (`record_thought`) is unaffected.
