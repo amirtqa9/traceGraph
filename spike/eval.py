@@ -31,6 +31,7 @@ Runs = tasks x scenarios x arms x k (all tasks, both scenarios, 7 arms, k=3 is 4
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import re
 import statistics
@@ -217,6 +218,8 @@ def run_eval(
                 )
 
     return {
+        "protocol": {"prompt": os.environ.get("TG_PROMPT", "default"), "cutoff": cutoff, "k": k,
+                     "cache_mode": cache_mode},
         "source": {
             "thread": source_thread,
             "cutoff": cutoff,

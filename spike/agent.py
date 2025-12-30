@@ -43,6 +43,22 @@ When you are done, reply with a final line of the form:
 ANSWER: <path>::<function>"""
 
 
+# Protocol variant "strict" (TG_PROMPT=strict): recording is required, not suggested. In the
+# first live run with the default prompt, gpt-oss:120b recorded no findings or thoughts at all,
+# so the memory being compared was empty.
+STRICT_RULES = """
+
+Recording is mandatory in this session:
+- After every tool result, call record_thought with your current hypotheses (cite the event IDs),
+  plan and next step.
+- Before your final ANSWER line, call record_finding at least once for what you established,
+  citing the supporting event IDs. Do not answer before that."""
+
+
+def system_prompt() -> str:
+    return SYSTEM_PROMPT + (STRICT_RULES if os.environ.get("TG_PROMPT") == "strict" else "")
+
+
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     # Memory state and thought state, both cumulative and checkpointed at every step,
@@ -134,7 +150,7 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
     bound = model.bind_tools(tools)
 
     def call_model(state: AgentState, config: RunnableConfig) -> dict:
-        response = bound.invoke([SystemMessage(SYSTEM_PROMPT), *state["messages"]])
+        response = bound.invoke([SystemMessage(system_prompt()), *state["messages"]])
         thought = tg.thoughts.capture(response, config)
         return {"messages": [response], "tg_thoughts": [thought.thought_id] if thought else []}
 

@@ -113,4 +113,5 @@ def test_analyze_renders_tables_with_intervals(tmp_path):
     )
     text = render(report)
     assert "### Scenario `bug_moved`" in text and "| slim_validated | 1 | 100% |" in text
+    assert "| slim | 1 | 0% | 0%–79% | 1 |" in text  # the failure is a stale answer
     assert "| pagination_overlap | 0/1 | 1/1 |" in text  # bug_moved: slim fails, validated recovers

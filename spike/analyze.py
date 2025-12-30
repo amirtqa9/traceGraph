@@ -14,6 +14,18 @@ import math
 import statistics
 from collections import defaultdict
 
+from spike.tasks import TASKS
+
+
+def is_stale_answer(run: dict) -> bool:
+    """In bug_moved, did the agent name the bug's *old* (pre-move) location?"""
+    task = TASKS.get(run["task"])
+    answer = run.get("answer") or ""
+    if run["scenario"] != "bug_moved" or task is None or run["correct"] or "::" not in answer:
+        return False
+    path, function = answer.split("ANSWER:")[-1].strip().split("::", 1)
+    return path.endswith(task.expected[0]) and function.split(".")[-1] == task.expected[1]
+
 
 def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
@@ -27,8 +39,8 @@ def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 def arm_table(runs: list[dict], arms: list[str]) -> list[str]:
     lines = [
-        "| arm | n | success | 95% CI | violations | errors | resume ctx (tok) | total input (tok) | tool calls | cache hits |",
-        "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|",
+        "| arm | n | success | 95% CI | stale answers | violations | errors | resume ctx (tok) | total input (tok) | tool calls | cache hits |",
+        "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for arm in arms:
         rs = [r for r in runs if r["arm"] == arm]
@@ -40,7 +52,7 @@ def arm_table(runs: list[dict], arms: list[str]) -> list[str]:
         mean = lambda key: statistics.mean(r.get(key, 0) for r in ok) if ok else 0  # noqa: E731
         lines.append(
             f"| {arm} | {len(ok)} | {wins / len(ok) if ok else 0:.0%} | {lo:.0%}–{hi:.0%} | "
-            f"{sum(r['violations'] > 0 for r in ok)} | {len(rs) - len(ok)} | {mean('resume_context_tokens'):.0f} | "
+            f"{sum(is_stale_answer(r) for r in ok)} | {sum(r['violations'] > 0 for r in ok)} | {len(rs) - len(ok)} | {mean('resume_context_tokens'):.0f} | "
             f"{mean('input_tokens'):.0f} | {mean('tool_calls'):.1f} | {mean('cache_hits'):.1f} |"
         )
     return lines
@@ -63,7 +75,9 @@ def render(report: dict) -> str:
     runs = [r for t in report["tasks"].values() for r in t["runs"]]
     arms = list(dict.fromkeys(r["arm"] for r in runs))
     scenarios = list(dict.fromkeys(r["scenario"] for r in runs))
-    out = [f"Runs: {len(runs)} over {len(report['tasks'])} task(s), scenarios {', '.join(scenarios)}.", ""]
+    protocol = next(iter(report["tasks"].values())).get("protocol", {})
+    out = [f"Runs: {len(runs)} over {len(report['tasks'])} task(s), scenarios {', '.join(scenarios)}; "
+           f"protocol: {protocol or 'default prompt'}.", ""]
     src = [t["source"] for t in report["tasks"].values()]
     out += [
         "Source sessions: "
