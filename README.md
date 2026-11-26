@@ -19,11 +19,12 @@ Design, evaluation and findings: [docs/paper.md](docs/paper.md).
 | **Task** | the caller | verbatim task and constraints, replayed on every resume |
 
 On top of these records:
-- **Validator:** a finding is valid only while every resource in its read set still fingerprints the same. Stale findings are reported with exactly what changed.
-- **Slim resume** (`TraceGraph.brief`): verbatim task and constraints, then current findings, then stale findings and what changed, side effects already performed, working memory, and a startup routine.
-- **Action cache:** a read tool's earlier output is reused only on the same tool and arguments *and* an unchanged read set. Advisory (measure) or enforcing (serve).
-- **Side-effect safety:** `fork_at` refuses to rewind past writes or external calls unless told to warn, proceed, or restore an opt-in git snapshot taken before each write.
-- **Hygiene:** secrets matching known patterns are redacted from event records, stored outputs and the tool results the model sees; schema versioning; age-based expiry that keeps provenance chains and side-effect records; blob garbage collection that marks every project sharing the data directory; projects isolated by namespace and by checkpoint database.
+- **Validator:** a finding is valid only while every resource in its read set can be re-checked and still fingerprints the same. A confirmed change makes it stale, reported with exactly what changed. A resource that cannot be checked here (no adapter, no workspace) makes it unverifiable: missing evidence is never treated as a match.
+- **Slim resume** (`TraceGraph.brief`): verbatim task and constraints, then current findings, then findings whose inputs could not be re-checked, then stale findings and what changed, side effects already performed (pending writes and external calls are flagged as outcome unknown), working memory, and a startup routine.
+- **Action cache:** a read tool's earlier output is reused only on the same tool and arguments *and* a read set whose every entry could be re-checked and still fingerprints the same. An uncheckable key is a miss, never a hit. Advisory (measure) or enforcing (serve).
+- **Recall** (`recall_event`): the recorded output of an earlier tool call, not a re-run, with a line saying whether its inputs are unchanged, changed, or uncheckable. Long outputs are paged; a missing blob is reported instead of raised.
+- **Side-effect safety:** write and external tools are recorded as pending before they run, so a crash still leaves a record that the side effect may have happened; rewind and resume treat that record as if it did. `fork_at` refuses to rewind past writes or external calls unless told to warn, proceed, or restore an opt-in git snapshot taken before each write.
+- **Hygiene:** secrets matching known patterns are redacted from event records, stored outputs and the tool results the model sees; schema versioning; age-based expiry that keeps provenance chains and side-effect records; blob garbage collection that marks every project sharing the data directory and keeps blobs younger than a grace period (default 15 minutes); projects isolated by namespace and by checkpoint database.
 
 > **Redaction boundary.** Redaction is pattern-based and covers what the Recorder stores. It
 > does not touch the model's own message: a secret the model puts in a tool call's arguments
@@ -71,7 +72,7 @@ tracegraph --data .tracegraph --project my-repo ls
 tracegraph --data .tracegraph --project my-repo --workspace . validate
 tracegraph --data .tracegraph --project my-repo --workspace . brief thread-1
 tracegraph --data .tracegraph --project my-repo stats
-tracegraph --data .tracegraph --project my-repo gc --older-than-days 30
+tracegraph --data .tracegraph --project my-repo gc --older-than-days 30 --grace-minutes 15
 ```
 
 ## Install and test

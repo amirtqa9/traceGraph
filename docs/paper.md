@@ -131,9 +131,9 @@ Each tool declares the keys it reads and writes. The Recorder fingerprints reads
 the call and writes after it. A finding's read set is the union of its sources' read sets,
 transitively, so staleness cascades. The validator gives a verdict against *any* checkout
 of the project:
-- **valid:** all fingerprints match;
-- **stale:** with the changed keys;
-- **unverifiable:** no read set.
+- **valid:** every input could be re-checked and still fingerprints the same;
+- **stale:** with the changed keys (a confirmed change wins over an uncheckable key);
+- **unverifiable:** no read set, or some input could not be re-checked here (no adapter, no workspace, an I/O error) and none changed. Missing evidence is never treated as a match.
 
 ### 3.3 Thought state
 
@@ -157,19 +157,21 @@ together. A thought becomes trusted only when promoted to a sourced finding.
 
 `slim_brief` seeds a fresh agent with:
 1. the verbatim task and constraints (never summarized);
-2. current findings;
-3. stale findings with what changed;
-4. side effects already performed;
-5. optionally working memory (flagged if its supports changed) and provider reasoning
+2. current findings (inputs re-checked and unchanged);
+3. unverified findings, whose inputs could not be re-checked here;
+4. stale findings with what changed;
+5. side effects already performed (pending writes and external calls flagged as
+   outcome unknown);
+6. optionally working memory (flagged if its supports changed) and provider reasoning
    (labeled "NOT evidence");
-6. a startup routine: re-check stale findings first, spot-check a ruled-out finding,
+7. a startup routine: re-check stale findings first, spot-check a ruled-out finding,
    don't redo covered work.
 
 ### 3.5 "Already done" cache and side effects
 
 Action cache:
 - **Key:** hash(tool, canonical args).
-- **Hit:** the newest earlier successful read whose read set still validates.
+- **Hit:** the newest earlier successful read whose every read-set entry could be re-checked and still fingerprints the same.
 - **Scope:** read tools only, scoped per project; it works across threads and sessions.
 - **Modes:** advisory (measure `would_hit`) and enforcing (serve `cached_from`). Fuzzy
   matches are never hits.
@@ -184,14 +186,16 @@ untouched.
 The implementation is Python 3.12 on LangGraph 1.2 / langchain-core 1.7 (`src/tracegraph/`).
 - The Recorder is a `ToolNode.wrap_tool_call` hook.
 - Records live in LangGraph's `Store` (SQLite through `TraceGraph.open`), checkpoints in
-  `SqliteSaver`, and blobs in a sha256 content-addressed directory.
-- Secrets are redacted from arguments, stored outputs and the model's view: keys, tokens,
-  private keys, quoted secret assignments and `.env` lines.
+  one SqliteSaver database per project, and blobs in a sha256 content-addressed directory.
+- Secrets are redacted from recorded arguments, stored outputs and the model's view of
+  tool results: keys, tokens, private keys, quoted secret assignments and `.env` lines.
+  Tool-call arguments in the checkpointed message history are not redacted (LangGraph
+  needs the original call to resume).
 - Records carry `schema_version` with migrations.
 - `gc` expires by age (keeping provenance chains intact) and mark-and-sweeps blobs.
 - A `tracegraph` CLI inspects, validates, briefs and collects garbage.
 
-The offline suite has 94 tests. A scripted chat model drives real LangGraph graphs; a fake
+The offline suite has 121 tests. A scripted chat model drives real LangGraph graphs; a fake
 `claude` binary tests the `claude -p` Messages-API shim; temporary git repositories test
 snapshots.
 
