@@ -138,7 +138,7 @@ class TraceGraph:
         return [
             make_record_finding_tool(self.ledger),
             make_record_thought_tool(self.thoughts),
-            make_recall_tool(self.events, self.blobs),
+            make_recall_tool(self.events, self.blobs, validator=self.validator if self.workspace else None),
         ]
 
     def brief(self, thread_id: str, *, working_memory: bool = True, provider_reasoning: bool = False) -> str:

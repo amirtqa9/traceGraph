@@ -190,15 +190,67 @@ def resume_message(text: str) -> HumanMessage:
     return HumanMessage(content=text)
 
 
-def make_recall_tool(events: EventLog, blobs: BlobStore) -> BaseTool:
+DEFAULT_RECALL_CHARS = 20_000
+
+
+def _freshness(event, validator: Validator | None) -> str | None:
+    """One line on whether this recorded output still matches the world, or None."""
+    if event.status == PENDING:
+        return "NOTE: this call's outcome is unknown (it never reported back); it may or may not have happened."
+    if validator is None or not event.read_set:
+        return None
+    verdict = validator.event(event)
+    if verdict.status == "stale":
+        return ("WARNING: this output may be out of date; its inputs changed since: "
+                + ", ".join(verdict.changed_locators) + ". Re-run the tool for the current version.")
+    if verdict.status == "unverifiable":
+        locs = ", ".join(sorted(k.partition(":")[2] or k for k in verdict.unavailable))
+        return f"NOTE: could not re-check this output's inputs here ({locs}); it may be out of date."
+    return "Inputs re-checked: unchanged since this call."
+
+
+def make_recall_tool(
+    events: EventLog, blobs: BlobStore, *, validator: Validator | None = None,
+    max_chars: int = DEFAULT_RECALL_CHARS,
+) -> BaseTool:
+    """`recall_event`: the recorded output of an earlier tool call, by event ID.
+
+    - It returns the output as recorded (redacted), not a re-run. With a `validator`, a
+      line says whether the inputs behind it are unchanged, changed, or uncheckable.
+    - Outputs longer than `max_chars` come back in pages; the tool says how to get the next.
+    - An event whose output blob is gone gets a clear message instead of an exception.
+    """
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
+
     @tool
-    def recall_event(event_id: str) -> str:
-        """Fetch the original output of an earlier tool call by its `ev_...` ID."""
+    def recall_event(event_id: str, offset: int = 0) -> str:
+        """Fetch the original output of an earlier tool call by its `ev_...` ID.
+
+        Args:
+            event_id: The `ev_...` ID shown under a tool result or cited by a finding.
+            offset: Character offset to start from, for long outputs returned in pages.
+        """
         event = events.get(event_id)
         if event is None:
-            return f"No event {event_id!r}."
-        output = blobs.get(event.output_ref).decode("utf-8")
-        return f"{event.tool}({event.args}) returned:\n{output}"
+            return f"No event {event_id!r} (unknown ID, or expired)."
+        header = f"{event.tool}({event.args}) returned:"
+        note = _freshness(event, validator)
+        try:
+            output = blobs.get(event.output_ref).decode("utf-8")
+        except (FileNotFoundError, ValueError):
+            lines = [f"Event {event_id} ({event.tool}) is on record, but its output is no longer stored."]
+            return "\n".join(lines + ([note] if note else []))
+        start = max(0, offset)
+        if start >= len(output) and output:
+            return f"{header}\n(offset {start} is past the end; the output is {len(output)} characters)"
+        page = output[start:start + max_chars]
+        lines = [header] + ([note] if note else []) + [page]
+        end = start + len(page)
+        if end < len(output):
+            lines.append(f"[showing characters {start}-{end} of {len(output)}; "
+                         f"call recall_event('{event_id}', offset={end}) for more]")
+        return "\n".join(lines)
 
     return recall_event
 

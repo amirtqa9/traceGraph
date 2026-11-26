@@ -27,6 +27,7 @@ from tracegraph import BlobStore, EventLog, FindingsLedger, Recorder, TaskRegist
 from tracegraph.findings import make_record_finding_tool
 from tracegraph.cache import ActionCache
 from tracegraph.resources import FilesystemAdapter, ResourceRegistry, filesystem_tool_resources
+from tracegraph.validator import Validator
 from tracegraph.resume import make_recall_tool
 from tracegraph.thoughts import ThoughtLog, make_record_thought_tool
 
@@ -145,7 +146,7 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
     tools = workspace_tools(workspace) + [
         make_record_finding_tool(tg.ledger),
         make_record_thought_tool(tg.thoughts),
-        make_recall_tool(tg.events, tg.blobs),
+        make_recall_tool(tg.events, tg.blobs, validator=Validator(registry)),
     ]
     bound = model.bind_tools(tools)
 
