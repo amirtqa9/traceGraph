@@ -42,7 +42,9 @@ class ResourceAdapter(Protocol):
 class FilesystemAdapter:
     """`fs:<file>` hashes file bytes; `fsdir:<dir>` hashes the recursive file listing.
 
-    Hashes are cached by (mtime_ns, size), so re-validating an unchanged tree is cheap.
+    Hashes always come from current file bytes. An (mtime, size) cache is not safe: a
+    same-size rewrite can keep the previous mtime (coarse clocks, some filesystems),
+    and would be reported as unchanged.
     """
 
     schemes = ("fs", "fsdir")
@@ -50,16 +52,9 @@ class FilesystemAdapter:
     def __init__(self, root: str | os.PathLike[str], ignore: Iterable[str] = ("__pycache__", ".git")) -> None:
         self.root = Path(root).resolve()
         self.ignore = frozenset(ignore)
-        self._cache: dict[Path, tuple[int, int, str]] = {}
 
     def _file_hash(self, path: Path) -> str:
-        st = path.stat()
-        cached = self._cache.get(path)
-        if cached and cached[:2] == (st.st_mtime_ns, st.st_size):
-            return cached[2]
-        digest = content_hash(path.read_bytes())
-        self._cache[path] = (st.st_mtime_ns, st.st_size, digest)
-        return digest
+        return content_hash(path.read_bytes())
 
     def files_under(self, locator: str) -> list[str]:
         base = self.root / normalize_locator(locator)
