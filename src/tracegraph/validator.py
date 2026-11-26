@@ -1,7 +1,9 @@
 """Staleness: is what a finding (or event, or thought) rests on still the same?
 
 A subject is valid iff every resource in its read set fingerprints the same now as when
-it was recorded. Nothing is deleted or rewritten: a verdict is computed on demand against
+it was recorded. A confirmed change makes it stale. A resource that cannot be checked here
+(no adapter, no workspace, an I/O error) makes an otherwise unchanged subject
+unverifiable: missing evidence is never reported as a match. Nothing is deleted or rewritten: a verdict is computed on demand against
 the current world (any checkout of the project), and stale subjects are reported with
 exactly which inputs changed, so a resumed agent knows what to re-check.
 """
@@ -24,6 +26,7 @@ class Verdict:
     subject_id: str
     status: Status
     changed: dict[str, tuple[str, str]]  # resource key -> (then, now)
+    unavailable: tuple[str, ...] = ()  # resource keys that could not be checked
 
     @property
     def changed_locators(self) -> list[str]:
@@ -37,8 +40,14 @@ class Validator:
     def check(self, subject_id: str, read_set: dict[str, str]) -> Verdict:
         if not read_set:
             return Verdict(subject_id, "unverifiable", {})
-        changed = self.registry.changed(read_set)
-        return Verdict(subject_id, "stale" if changed else "valid", changed)
+        cmp = self.registry.compare(read_set)
+        if cmp.changed:
+            status: Status = "stale"
+        elif cmp.unavailable:
+            status = "unverifiable"
+        else:
+            status = "valid"
+        return Verdict(subject_id, status, cmp.changed, cmp.unavailable)
 
     def event(self, event: ActionEvent) -> Verdict:
         return self.check(event.event_id, event.read_set)

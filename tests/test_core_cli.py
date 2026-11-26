@@ -73,9 +73,9 @@ def test_gc_sweeps_orphans_and_expire_keeps_provenance(tmp_path):
     ws, data = populate(tmp_path)
     tg = TraceGraph.open(data, "shop", workspace=ws)
     orphan = tg.blobs.put(b"nobody references me")
-    dry = collect_garbage(tg.blobs, tg.events, tg.thoughts, dry_run=True)
+    dry = collect_garbage(tg.blobs, tg.events, tg.thoughts, dry_run=True, grace=dt.timedelta(0))
     assert dry.removed == 1 and tg.blobs.has(orphan)
-    real = collect_garbage(tg.blobs, tg.events, tg.thoughts)
+    real = collect_garbage(tg.blobs, tg.events, tg.thoughts, grace=dt.timedelta(0))
     assert real.removed == 1 and not tg.blobs.has(orphan)
     assert all(tg.blobs.has(e.output_ref) for e in tg.events.all())
 

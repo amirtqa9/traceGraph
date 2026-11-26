@@ -10,9 +10,11 @@ the same project (that is what makes cross-session validation work).
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import subprocess
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -103,6 +105,24 @@ class GitAdapter:
         return self._git("rev-parse", "HEAD")
 
 
+@dataclass(frozen=True)
+class Comparison:
+    """A read set checked against the current world.
+
+    `changed` keys fingerprint differently now. `unavailable` keys could not be checked at
+    all (no adapter for the scheme, a bad locator, an I/O error). Callers must treat an
+    unavailable key as unknown, never as a match.
+    """
+
+    changed: dict[str, tuple[str, str]] = field(default_factory=dict)  # key -> (then, now)
+    unavailable: tuple[str, ...] = ()
+
+    @property
+    def matched(self) -> bool:
+        """Every key was checked and none changed."""
+        return not self.changed and not self.unavailable
+
+
 class ResourceRegistry:
     def __init__(self, *adapters: ResourceAdapter) -> None:
         self._by_scheme: dict[str, ResourceAdapter] = {}
@@ -120,21 +140,36 @@ class ResourceRegistry:
     def snapshot(self, keys: Iterable[str]) -> dict[str, str]:
         return {key: self.fingerprint(key) for key in sorted(set(keys))}
 
-    def changed(self, read_set: dict[str, str]) -> dict[str, tuple[str, str]]:
-        """Keys whose fingerprint differs now: {key: (then, now)}."""
-        out = {}
+    def compare(self, read_set: dict[str, str]) -> Comparison:
+        """Re-fingerprint every key in `read_set`; report what changed and what could not be checked."""
+        changed: dict[str, tuple[str, str]] = {}
+        unavailable: list[str] = []
         for key, then in read_set.items():
             try:
                 now = self.fingerprint(key)
-            except KeyError:
-                continue  # no adapter in this context; can't judge
+            except (KeyError, ValueError, OSError):
+                unavailable.append(key)
+                continue
             if now != then:
-                out[key] = (then, now)
-        return out
+                changed[key] = (then, now)
+        return Comparison(changed, tuple(sorted(unavailable)))
+
+    def changed(self, read_set: dict[str, str]) -> dict[str, tuple[str, str]]:
+        """Keys whose fingerprint differs now: {key: (then, now)}.
+
+        Keys that cannot be checked are NOT in this result. Do not read an empty result as
+        "unchanged": use `compare(...).matched` for that.
+        """
+        return self.compare(read_set).changed
 
 
-def filesystem_tool_resources(adapter: FilesystemAdapter) -> dict[str, ToolResources]:
-    """Resource declarations for the common read_file / list_files / grep / write_file tools."""
+def filesystem_tool_resources(adapter: FilesystemAdapter, *, grep_glob: str = "*") -> dict[str, ToolResources]:
+    """Resource declarations for the common read_file / list_files / grep / write_file tools.
+
+    `grep_glob` must match the files your grep tool actually scans (matched against the
+    file name). The default, every file, over-declares for a narrower grep: that can only
+    make results go stale more often, never let a changed file go unnoticed.
+    """
 
     def read_file(args: dict) -> tuple[list[str], list[str]]:
         return [f"fs:{normalize_locator(args['path'])}"], []
@@ -144,7 +179,7 @@ def filesystem_tool_resources(adapter: FilesystemAdapter) -> dict[str, ToolResou
 
     def grep(args: dict) -> tuple[list[str], list[str]]:
         scope = normalize_locator(args.get("path", "."))
-        files = [f for f in adapter.files_under(scope) if f.endswith(".py")]
+        files = [f for f in adapter.files_under(scope) if fnmatch.fnmatch(Path(f).name, grep_glob)]
         return [f"fsdir:{scope}"] + [f"fs:{f}" for f in files], []
 
     def write_file(args: dict) -> tuple[list[str], list[str]]:

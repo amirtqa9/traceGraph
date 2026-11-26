@@ -8,12 +8,14 @@ cite these IDs as their sources.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from langchain_core.messages import ToolMessage
 from langgraph.store.base import BaseStore
+from langgraph.types import Command
 
 from tracegraph.canonical import short_id
 from tracegraph.cas import BlobStore
@@ -24,6 +26,10 @@ from tracegraph.schema import SCHEMA_VERSION, check_schema
 ToolKind = Literal["read", "write", "external"]
 
 EVENT_FOOTER = "[event: {event_id}]"
+# Status of a write/external event recorded before its tool runs. It is overwritten when the
+# tool returns; if it never is (crash, exception), the side effect may or may not have
+# happened, and rewind / resume treat it as if it did.
+PENDING = "pending"
 EVENT_ID_RE = re.compile(r"\[event: (ev_[0-9a-f]{12})\]")
 
 
@@ -112,6 +118,10 @@ class Recorder:
     - `cache` (M4): read tools whose earlier output is still valid are served from the
       cache when its mode is "enforce", or flagged `would_hit` when "advisory".
     - `snapshotter` (M5): a workspace snapshot is taken before every write tool.
+    - Write and external tools are recorded as `pending` before they run, so a crash or an
+      exception still leaves a record that a side effect may have happened.
+    - Tools may return a ToolMessage or a LangGraph `Command`; both are recorded. For a
+      Command, the ToolMessage for this call inside `update["messages"]` is the output.
     - Tools in `untracked` (TraceGraph's own bookkeeping tools) pass through unrecorded.
     """
 
@@ -169,26 +179,8 @@ class Recorder:
             self.snapshotter.snapshot(event_id) if self.snapshotter is not None and kind == "write" else None
         )
 
-        if served is not None:
-            output = self.blobs.get(served.output_ref).decode("utf-8")
-            status = "success"
-            read_set = served.read_set
-            result = ToolMessage(content=output, tool_call_id=tool_call_id, name=name)
-        else:
-            result = execute(request)
-            if not isinstance(result, ToolMessage):
-                return result
-            output = message_text(result.content)
-            status = result.status
-
-        kinds: set[str] = set()
-        if self.redact:
-            args, arg_kinds = redact_value(args)
-            red = redact_text(output)
-            output = red.text
-            kinds = set(arg_kinds) | set(red.kinds)
-
-        event = ActionEvent(
+        stored_args, arg_kinds = redact_value(args) if self.redact else (args, ())
+        base = dict(
             event_id=event_id,
             project_id=self.events.project_id,
             thread_id=thread_id,
@@ -198,7 +190,35 @@ class Recorder:
             tool_call_id=tool_call_id,
             tool=name,
             kind=kind,
-            args=args,
+            args=stored_args,
+            pre_snapshot=pre_snapshot,
+        )
+
+        if served is not None:
+            output = self.blobs.get(served.output_ref).decode("utf-8")
+            status = "success"
+            read_set = served.read_set
+            result = ToolMessage(content=output, tool_call_id=tool_call_id, name=name)
+            message = result
+        else:
+            if kind in ("write", "external"):
+                self.events.put(ActionEvent(
+                    **base, output_ref=self.blobs.put(b""), status=PENDING, read_set=read_set,
+                    redactions=sorted(set(arg_kinds)),
+                ))
+            result = execute(request)
+            message = _tool_message_for(result, tool_call_id)
+            output = message_text(message.content) if message is not None else ""
+            status = message.status if message is not None else "success"
+
+        kinds: set[str] = set(arg_kinds)
+        if self.redact:
+            red = redact_text(output)
+            output = red.text
+            kinds |= set(red.kinds)
+
+        event = ActionEvent(
+            **base,
             output_ref=self.blobs.put(output.encode("utf-8")),
             status=status,
             read_set=read_set,
@@ -206,10 +226,29 @@ class Recorder:
             redactions=sorted(kinds),
             cached_from=served.event_id if served is not None else None,
             would_hit=hit.event_id if hit is not None and served is None else None,
-            pre_snapshot=pre_snapshot,
         )
         self.events.put(event)
         if self.cache is not None and served is None:
             self.cache.record(event, dict(request.tool_call.get("args", {})))
+        if message is None:
+            return result  # a Command with no ToolMessage for this call: nothing to tag
         footer = EVENT_FOOTER.format(event_id=event.event_id)
-        return result.model_copy(update={"content": f"{output}\n\n{footer}"})
+        tagged = message.model_copy(update={"content": f"{output}\n\n{footer}"})
+        return tagged if isinstance(result, ToolMessage) else _replace_tool_message(result, message, tagged)
+
+
+def _tool_message_for(result: Any, tool_call_id: str) -> ToolMessage | None:
+    """The ToolMessage answering `tool_call_id`: the result itself, or one inside a Command."""
+    if isinstance(result, ToolMessage):
+        return result
+    if isinstance(result, Command) and isinstance(result.update, dict):
+        for m in result.update.get("messages", None) or []:
+            if isinstance(m, ToolMessage) and m.tool_call_id == tool_call_id:
+                return m
+    return None
+
+
+def _replace_tool_message(command: Command, old: ToolMessage, new: ToolMessage) -> Command:
+    update = dict(command.update)
+    update["messages"] = [new if m is old else m for m in update["messages"]]
+    return dataclasses.replace(command, update=update)

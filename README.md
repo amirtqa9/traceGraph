@@ -23,7 +23,14 @@ On top of these records:
 - **Slim resume** (`TraceGraph.brief`): verbatim task and constraints, then current findings, then stale findings and what changed, side effects already performed, working memory, and a startup routine.
 - **Action cache:** a read tool's earlier output is reused only on the same tool and arguments *and* an unchanged read set. Advisory (measure) or enforcing (serve).
 - **Side-effect safety:** `fork_at` refuses to rewind past writes or external calls unless told to warn, proceed, or restore an opt-in git snapshot taken before each write.
-- **Hygiene:** secrets are redacted before anything is stored; schema versioning; age-based expiry that keeps provenance chains; blob garbage collection; projects isolated by namespace.
+- **Hygiene:** secrets matching known patterns are redacted from event records, stored outputs and the tool results the model sees; schema versioning; age-based expiry that keeps provenance chains and side-effect records; blob garbage collection that marks every project sharing the data directory; projects isolated by namespace and by checkpoint database.
+
+> **Redaction boundary.** Redaction is pattern-based and covers what the Recorder stores. It
+> does not touch the model's own message: a secret the model puts in a tool call's arguments
+> stays in the checkpointed history (LangGraph needs the original call to resume it). Keep
+> secrets out of prompts and tool arguments where you can (resolve them inside the tool), and
+> protect checkpoints at rest with `tg.checkpointer(serde=EncryptedSerializer.from_pycryptodome_aes())`
+> (from `langgraph.checkpoint.serde.encrypted`; needs `pycryptodome` and `LANGGRAPH_AES_KEY`).
 
 ## Use
 

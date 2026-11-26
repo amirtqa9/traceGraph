@@ -138,7 +138,7 @@ def build_agent(model: BaseChatModel, workspace: Path, tg: TraceGraphComponents,
         tg.blobs,
         tool_kinds=TOOL_KINDS,
         untracked=frozenset({"record_finding", "record_thought", "recall_event"}),
-        resources=filesystem_tool_resources(fs),
+        resources=filesystem_tool_resources(fs, grep_glob="*.py"),  # matches grep() above
         registry=registry,
         cache=cache,
     )

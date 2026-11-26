@@ -2,8 +2,8 @@
 
 - Lookup key: hash(tool, canonical args). The index maps it to earlier events.
 - A hit is the newest earlier event for that key that succeeded, has a non-empty read
-  set, and whose read set still fingerprints the same: the inputs are provably unchanged,
-  so the output would be too.
+  set, and whose every read-set entry could be re-checked and still fingerprints the
+  same. A key that cannot be checked here (no adapter, no workspace) is a miss, never a hit.
 - Only `read` tools are ever cached; `write` and `external` tools always run.
 - Modes: "off"; "advisory" (run anyway, record `would_hit` so hit correctness and rate
   can be measured); "enforce" (serve the earlier output, record `cached_from`).
@@ -61,7 +61,7 @@ class ActionCache:
             event = self.events.get(event_id)
             if event is None or not event.read_set:
                 continue
-            if not self.registry.changed(event.read_set):
+            if self.registry.compare(event.read_set).matched:
                 return event
         return None
 

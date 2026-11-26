@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     gc = sub.add_parser("gc", help="expire old records, then sweep unreferenced blobs")
     gc.add_argument("--older-than-days", type=float)
     gc.add_argument("--dry-run", action="store_true")
+    gc.add_argument("--grace-minutes", type=float, default=15.0,
+                    help="never remove blobs younger than this (default 15; another process may be writing)")
     sub.add_parser("bust", help="drop the action-cache index (records are kept)")
     args = parser.parse_args(argv)
 
@@ -84,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.older_than_days is not None:
                 _print(asdict(expire(tg.events, tg.ledger, tg.thoughts, dt.timedelta(days=args.older_than_days),
                                      dry_run=args.dry_run)))
-            _print(asdict(collect_garbage(tg.blobs, tg.events, tg.thoughts, dry_run=args.dry_run)))
+            _print(asdict(collect_garbage(tg.blobs, tg.events, tg.thoughts, dry_run=args.dry_run,
+                                          grace=dt.timedelta(minutes=args.grace_minutes))))
         elif args.command == "bust":
             print(f"removed {tg.cache.bust()} cache keys")
     finally:

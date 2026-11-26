@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.tools import BaseTool, tool
 
 from tracegraph.cas import BlobStore
-from tracegraph.events import EVENT_ID_RE, EventLog, message_text
+from tracegraph.events import EVENT_ID_RE, PENDING, EventLog, message_text
 from tracegraph.findings import FindingsLedger
 from tracegraph.tasks import TaskRegistry
 from tracegraph.thoughts import ThoughtLog
@@ -26,7 +26,11 @@ def _render_finding(f, verdict=None) -> str:
     if verdict is not None and verdict.status == "stale":
         line += f"\n  changed since: {', '.join(verdict.changed_locators)}"
     elif verdict is not None and verdict.status == "unverifiable":
-        line += "\n  (inputs not tracked; cannot be checked for staleness)"
+        if verdict.unavailable:
+            locs = ", ".join(sorted(k.partition(":")[2] or k for k in verdict.unavailable))
+            line += f"\n  (could not re-check here: {locs})"
+        else:
+            line += "\n  (inputs not tracked; cannot be checked for staleness)"
     return line
 
 
@@ -59,8 +63,14 @@ def slim_brief(
     todos = [f for f in sourced if f.kind == "todo"]
     carried = [f for f in sourced if f.kind != "todo"]
     verdicts = {f.finding_id: validator.finding(f) for f in carried} if validator else {}
-    stale = [f for f in carried if verdicts.get(f.finding_id) and verdicts[f.finding_id].status == "stale"]
-    current = [f for f in carried if f not in stale]
+    def status(f) -> str | None:
+        v = verdicts.get(f.finding_id)
+        return v.status if v is not None else None
+
+    stale = [f for f in carried if status(f) == "stale"]
+    # With a validator, only findings whose inputs were all re-checked count as current.
+    unverified = [f for f in carried if status(f) == "unverifiable"] if validator else []
+    current = [f for f in carried if f not in stale and f not in unverified]
 
     out = [
         "You are resuming a task from an earlier session. You have none of its "
@@ -76,6 +86,9 @@ def slim_brief(
     heading += "; inputs re-checked and unchanged)" if validator else ")"
     out += ["", heading]
     out += [_render_finding(f, verdicts.get(f.finding_id)) for f in current] or ["- (none)"]
+    if unverified:
+        out += ["", "## Unverified findings (inputs could not be re-checked; confirm before relying on them)"]
+        out += [_render_finding(f, verdicts[f.finding_id]) for f in unverified]
     if stale:
         out += ["", "## Stale findings (their inputs changed since; do NOT rely on them)"]
         out += [_render_finding(f, verdicts[f.finding_id]) for f in stale]
@@ -87,7 +100,11 @@ def slim_brief(
         effects = [e for e in events.for_threads(lineage) if e.kind in ("write", "external")]
         if effects:
             out += ["", "## Side effects already performed (not undone; do not repeat blindly)"]
-            out += [f"- [{e.event_id}] {e.kind}: {e.tool}({e.args})" for e in effects]
+            out += [
+                f"- [{e.event_id}] {e.kind}: {e.tool}({e.args})"
+                + (" (outcome unknown: it may or may not have happened)" if e.status == PENDING else "")
+                for e in effects
+            ]
     if thoughts is not None and working_memory:
         latest = thoughts.for_threads(lineage, source="agent")[-1:]
         if latest:

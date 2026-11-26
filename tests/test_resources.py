@@ -41,9 +41,11 @@ def test_locators_cannot_escape_the_root():
         normalize_locator("/etc/passwd")
 
 
-def test_unknown_scheme_is_skipped_not_judged(tmp_path):
+def test_unknown_scheme_is_unavailable_not_matched(tmp_path):
     reg = ResourceRegistry(FilesystemAdapter(tmp_path))
-    assert reg.changed({"http:example.com": "sha256:x"}) == {}
+    cmp = reg.compare({"http:example.com": "sha256:x"})
+    assert cmp.changed == {} and cmp.unavailable == ("http:example.com",)
+    assert not cmp.matched
 
 
 def test_git_adapter_uses_blob_ids(tmp_path):
@@ -58,7 +60,10 @@ def test_git_adapter_uses_blob_ids(tmp_path):
 def test_grep_reads_every_scanned_file(tmp_path):
     (tmp_path / "a.py").write_text("")
     (tmp_path / "b.txt").write_text("")
-    decl = filesystem_tool_resources(FilesystemAdapter(tmp_path))
+    fs = FilesystemAdapter(tmp_path)
+    # Default: every file, so a grep over any file type gets a complete read set.
+    assert filesystem_tool_resources(fs)["grep"]({"pattern": "x"}) == (["fsdir:.", "fs:a.py", "fs:b.txt"], [])
+    decl = filesystem_tool_resources(fs, grep_glob="*.py")
     assert decl["grep"]({"pattern": "x"}) == (["fsdir:.", "fs:a.py"], [])
     assert decl["write_file"]({"path": "out.txt"}) == ([], ["fs:out.txt"])
 
